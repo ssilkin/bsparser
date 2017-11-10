@@ -1,0 +1,135 @@
+<style type="text/css">
+* {
+  font-family:monospace;
+}
+
+pre {
+    margin: 0 0;
+}
+
+</style>
+<body>
+<div style="height: 0px;width: 0px; overflow:hidden;">
+  <input type="file" id="files">
+</div>
+<div id="open">Open</div>
+<pre id="content"></pre>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.1.0/jquery.min.js"></script>
+<script src="./parser.js"></script>
+<script>
+var parser = null;
+
+function open(file) {
+  while (pos < length) {
+    var buffer = 0;
+    parser.parse(addhdr, buffer);
+  }
+}
+
+function padstr(x, length, padding, after) {
+  if (x.length > length)
+    return x.slice(0, length);
+  var pad = Array(length - x.length + 1).join(padding);
+  return after? x + pad : pad + x;
+}
+
+function tostr(x, base, length, padding) {
+  var str = x.toString(base);
+  return padstr(str, length, padding, false);
+}
+
+function add(h) {
+  /*if (!($("#content").is(":parent"))) {
+    var e = "<span>"
+      + padstr("Addr",  10, ' ', 0)
+      + padstr("Length", 8, ' ', 0)
+      + padstr("Type",   8, ' ', 0)
+      + padstr("Extra",  8, ' ', 0)
+      + "</span><br>";
+    $("#content").append(e);
+  }*/
+
+  var str = "0x"
+    + tostr(h["@addr"], 16, 8, '0')
+    + tostr(h["@length"], 10, 8, ' ')
+    + padstr(h["@type"], 8, ' ', false);
+  if ("@extra" in h)
+      str += '   ' + h["@extra"];
+
+  var $elem = $("<span>", {id: "h" + h["@id"], text: str});
+  if (h['@keyframe'] || 0)
+    $elem.attr("style", 'color:red');
+  $("#content").append($elem);
+  $("#content").append("<br>");  
+}
+
+function open(file) {
+  var fr = new FileReader();
+  fr.onloadend = (function(file) {
+    return function(evt) {
+      if (evt.target.readyState == FileReader.DONE) {
+        var fmt = file.name.toLowerCase().split('.').pop();
+        parser = create_parser(fmt);
+        if (parser == null)
+          return;
+
+        var pos = 0;
+        var length = evt.target.result.byteLength;
+        while (pos < length) {
+          var buffer = new Uint8Array(evt.target.result.slice(pos,
+            pos + Math.min(1024, length - pos)));
+          pos += buffer.length;
+          parser.parse(buffer);
+
+          if (pos >= length)
+            parser.parse(null);
+
+          while(1) {
+            var h = parser.next();
+            if (h==null) break;
+            add(h);
+          }
+        }
+      }
+    }
+  })(file);
+  fr.readAsArrayBuffer(file);
+}
+
+$("#files").change(function(e) {
+  $("#open").remove();
+  open(e.target.files[0]);
+});
+
+$(document).ready(function() {
+  $("#content").click(function(evt) {
+    var id = evt.target.id;
+    if (id) {
+      if (id.substring(0, 1) == "h") {
+        var next = $(evt.target).next("span");
+        if (next.length && next[0].id && next[0].id.substring(0, 1) == "c") {
+          $(next[0]).remove();
+        } else {
+          id = parseInt(id.substring(1, id.length));
+          var h = parser.get(id)
+          var elem = "<span id=\"c" + id + "\" style=\"color:gray\">";
+          for (var k in h) {
+            if (k.substring(0, 1) != "@") {
+              console.log(k, h[k]);
+              elem += "<br><span> " + padstr(k, 50, ' ', 1)
+                + h[k] + "</span>";
+            }
+          }
+          elem += "</span>";
+          $(event.target).after(elem);
+        }
+      }
+    }
+  });
+
+  $("#open").click(function() {
+    $("#files").trigger("click");
+  });
+});
+</script>
+</body>
