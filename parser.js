@@ -127,7 +127,7 @@ function file_parser_base() {
 function file_parser_ivf() {
   file_parser_base.call(this);
   this.goto = 2;
-  this.need = 8;  
+  this.need = 8;
 }
 
 file_parser_ivf.prototype = new file_parser_base();
@@ -634,7 +634,7 @@ bitstream_parser_h264.prototype.parse_sps = function(bs, sps) {
   sps['constraint_set2_flag'] = bs.u(1);
   sps['constraint_set3_flag'] = bs.u(1);
   sps['constraint_set4_flag'] = bs.u(1);
-  sps['constraint_set5_flag'] = bs.u(1);	
+  sps['constraint_set5_flag'] = bs.u(1);
   sps['reserved_zero_2bits'] = int2str(bs.u(2), 2, 2, '0');
   sps['level_idc'] = bs.u(8);
   sps['seq_parameter_set_id'] = bs.ue();
@@ -740,6 +740,23 @@ bitstream_parser_h264.prototype.parse_sps = function(bs, sps) {
   }
 }
 
+bitstream_parser_h264.prototype.parse_hrd = function(bs) {
+  var hrd = {};
+  hrd['cpb_cnt_minus1'] = bs.ue();
+  hrd['bit_rate_scale'] = bs.u(4);
+  hrd['cpb_size_scale'] = bs.u(4);
+  for (var i = 0; i < hrd['cpb_cnt_minus1'] + 1; i++) {
+      hrd['bit_rate_value_minus1['+i+']'] = bs.ue();
+      hrd['cpb_size_value_minus1['+i+']'] = bs.ue();
+      hrd['cbr_flag['+i+']'] = bs.u(1);
+  }
+  hrd['initial_cpb_removal_delay_length_minus1'] = bs.u(5);
+  hrd['cpb_removal_delay_length_minus1'] = bs.u(5);
+  hrd['dpb_output_delay_length_minus1'] = bs.u(5);
+  hrd['time_offset_length'] = bs.u(5);
+  return hrd;
+}
+
 bitstream_parser_h264.prototype.parse_pps = function(bs, pps) {
   pps['pic_parameter_set_id'] = bs.ue();
   pps['seq_parameter_set_id'] = bs.ue();
@@ -782,26 +799,26 @@ bitstream_parser_h264.prototype.parse_slice = function(bs, sh) {
   var pps = this.find_nalu([8], 'pic_parameter_set_id', sh['pic_parameter_set_id']);
   if (pps == null)
       return sh;
-      
+
   var sps = this.find_nalu(sh['nal_unit_type'] == 20? [15] : [7], 'seq_parameter_set_id', pps['seq_parameter_set_id']);
   if (sps == null)
       return sh;
-  
+
   if ('separate_colour_plane_flag' in sps
       && sps['separate_colour_plane_flag'] == 1)
       sh['colour_plane_id'] = bs.u(2);
-  
+
   sh['frame_num'] = bs.u(sps['log2_max_frame_num_minus4']+4);
-  
+
   if (sps['frame_mbs_only_flag'] == 0) {
       sh['field_pic_flag'] = bs.u(1);
       if (sh['field_pic_flag'])
           sh['bottom_field_flag'] = bs.u(1);
   }
-  
+
   if (sh['nal_unit_type'] == 5 || ('idr_flag' in sh && sh['idr_flag'] == 1))
       sh['idr_pic_id'] = bs.ue();
-  
+
   if (sps['pic_order_cnt_type'] == 0) {
       sh['pic_order_cnt_lsb'] = bs.u(sps['log2_max_pic_order_cnt_lsb_minus4'] + 4);
       if (pps['bottom_field_pic_order_in_frame_present_flag'] == 1
@@ -813,14 +830,14 @@ bitstream_parser_h264.prototype.parse_slice = function(bs, sh) {
           && 'field_pic_flag' in sh && sh['field_pic_flag'] == 0)
           sh['delta_pic_order_cnt[1]'] = bs.se();
   }
-  
+
   if (pps['redundant_pic_cnt_present_flag'] == 1)
       sh['redundant_pic_cnt'] = bs.ue();
-  
+
   if (!('quality_id' in sh) || sh['quality_id'] == 0) {
       if (sh['slice_type'] % 5 == 1)
           sh['direct_spatial_mv_pred_flag'] = bs.u(1);
-      
+
       if (in_range(sh['slice_type'] % 5, [0, 1, 3])) {
           sh['num_ref_idx_active_override_flag'] = bs.u(1);
           if (sh['num_ref_idx_active_override_flag']) {
@@ -829,7 +846,7 @@ bitstream_parser_h264.prototype.parse_slice = function(bs, sh) {
                   sh['num_ref_idx_l1_active_minus1'] = bs.ue();
           }
       }
-          
+
       if (!in_range(sh['slice_type'] % 5, [2, 4])) {
           for (var list = 0; list < (sh['slice_type'] % 5 == 1? 2 : 1); list++) {
               sh['ref_pic_list_modification_flag_l' + list] = bs.u(1);
@@ -877,7 +894,7 @@ bitstream_parser_h264.prototype.parse_slice = function(bs, sh) {
               }
           }
       }
-                              
+
       if (sh['nal_ref_idc'] != 0) {
           if (sh['nal_unit_type'] == 5 || ('idr_flag' in sh && sh['idr_flag'] == 1)) {
               sh['no_output_of_prior_pics_flag'] = bs.u(1);
@@ -902,7 +919,7 @@ bitstream_parser_h264.prototype.parse_slice = function(bs, sh) {
                   }
               }
           }
-          
+
           if ('slice_header_restriction_flag' in sps
               && sps['slice_header_restriction_flag'] == 0) {
               sh['store_ref_base_pic_flag'] = bs.u(1);
@@ -937,7 +954,7 @@ bitstream_parser_h264.prototype.parse_slice = function(bs, sh) {
           sh['sp_for_switch_flag'] = bs.u(1);
       sh['slice_qs_delta'] = bs.se();
   }
-  
+
   if (pps['deblocking_filter_control_present_flag']) {
       sh['disable_deblocking_filter_idc'] = bs.ue();
       if (sh['disable_deblocking_filter_idc'] != 1) {
@@ -945,7 +962,7 @@ bitstream_parser_h264.prototype.parse_slice = function(bs, sh) {
           sh['slice_beta_offset_div2'] = bs.se();
       }
   }
-  
+
   if (sh['nal_unit_type'] == 20) {
       if (sh['no_inter_layer_pred_flag'] == 0 && sh['quality_id'] == 0) {
           sh['ref_layer_dq_id'] = bs.ue();
@@ -968,7 +985,7 @@ bitstream_parser_h264.prototype.parse_slice = function(bs, sh) {
               sh['scaled_ref_layer_bottom_offset'] = bs.se();
           }
       }
-      
+
       if (sh['no_inter_layer_pred_flag'] == 0) {
           sh['slice_skip_flag'] = bs.u(1);
           if (sh['slice_skip_flag'])
@@ -988,7 +1005,7 @@ bitstream_parser_h264.prototype.parse_slice = function(bs, sh) {
               && sps['adaptive_tcoeff_level_prediction_flag'] == 1)
               sh['default_residual_prediction_flag'] = bs.u(1);
       }
-      
+
       if (sps['slice_header_restriction_flag'] == 0
           && (!('slice_skip_flag' in sh) || sh['slice_skip_flag'] == 0)) {
               sh['scan_idx_start'] = bs.u(4);
