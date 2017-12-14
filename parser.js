@@ -258,6 +258,31 @@ function bitstream_parser_base(idoff) {
   }
 }
 
+function bitstream_parser_vp8(idoff) {
+  bitstream_parser_base.call(this, idoff);
+}
+
+bitstream_parser_vp8.prototype = new bitstream_parser_base();
+bitstream_parser_vp8.prototype.parse = function (buffer, addr) {
+  var bs = new bitstream(buffer);
+  var h = {};
+  var byte = bs.u(8);
+  h['frame_type'] = byte & 1;
+  h['version'] = (byte >> 1) & 7;
+  h['show_frame'] = (byte >> 4) & 1;
+  h['partition_length'] = (byte | (bs.u(8) << 8) | (bs.u(8) << 16)) >> 5;
+  if (h['frame_type'] == 0) {
+    h['sync_code'] = '0x' + int2str(bs.u(24), 16, 6, 0);
+    h['width'] = (bs.u(8) | (bs.u(8) << 8)) & 0x3fff;
+    h['height'] = (bs.u(8) | (bs.u(8) << 8)) & 0x3fff;
+  }
+  h['@addr'] = addr;
+  h['@type'] = h['frame_type'] == 0 ? 'I' : 'P';
+  h['@length'] = buffer.length;
+  h['@keyframe'] = 1 - h['frame_type'];
+  this.store(h);
+}
+
 function bitstream_parser_vp9(idoff) {
   bitstream_parser_base.call(this, idoff);
 }
