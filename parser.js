@@ -65,10 +65,10 @@ function bitstream(buffer) {
   }
 }
 
-function int2str(x, base, length, padding) {
+function int2str(x, base, length, padding, padend) {
   var str = x.toString(base);
   var pad = Array(length - str.length + 1).join(padding);
-  return pad + str;
+  return padend? str + pad : pad + str;
 }
 
 function more_rbsp_data(bs) {
@@ -272,7 +272,7 @@ bitstream_parser_vp8.prototype.parse = function (buffer, addr) {
   h['show_frame'] = (byte >> 4) & 1;
   h['partition_length'] = (byte | (bs.u(8) << 8) | (bs.u(8) << 16)) >> 5;
   if (h['frame_type'] == 0) {
-    h['sync_code'] = '0x' + int2str(bs.u(24), 16, 6, 0);
+    h['sync_code'] = '0x' + int2str(bs.u(24), 16, 6, 0, 0);
     h['width'] = (bs.u(8) | (bs.u(8) << 8)) & 0x3fff;
     h['height'] = (bs.u(8) | (bs.u(8) << 8)) & 0x3fff;
   }
@@ -321,7 +321,7 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
       h['frame_sync_bytes'] = bs.u(8) + ', ' + bs.u(8) + ', ' + bs.u(8);
       if (h['profile'] > 0) {
         this.color_config(h, bs);
-        h['refresh_frame_flags'] = bs.u(8);
+        h['refresh_frame_flags'] = int2str(bs.u(8), 2, 8, '0', 0);
         h['frame_width_minus_1'] = bs.u(16);
         h['frame_height_minus_1'] = bs.u(16);
         h['render_and_frame_size_different'] = bs.u(1);
@@ -331,7 +331,7 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
         }
       }
     } else {
-      h['refresh_frame_flags'] = bs.u(8);
+      h['refresh_frame_flags'] = int2str(bs.u(8), 2, 8, '0', 0);
       for (var i = 0; i < 3; i++) {
         h['ref_frame_idx[' + i + ']'] = bs.u(3);
         h['ref_frame_sign_bias[' + i + ']'] = bs.u(1);
@@ -429,7 +429,7 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
     h['@FrameWidth'] = h['frame_width_minus_1'] + 1;
     h['@FrameHeight'] = h['frame_height_minus_1'] + 1;
   } else {
-    var ref = this.find_ref(ref_idx);
+    var ref = this.find_ref(h['ref_frame_idx[' + ref_idx + ']']);
     if (ref) {
       h['@FrameWidth'] = ref['@FrameWidth'];
       h['@FrameHeight'] = ref['@FrameHeight'];
@@ -463,7 +463,14 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
   h['@type'] = h['frame_type'] == 0 ? 'I' : 'P';
   h['@length'] = buffer.length;
   h['@keyframe'] = 1 - h['frame_type'];
-  h['@extra'] = 'QP ' + h['base_q_idx'];
+  h['@extra'] = int2str(h['@FrameWidth'], 10, 4, ' ', 0) + 'x' +
+      int2str(h['@FrameHeight'], 10, 4, ' ', 1) +
+      ' QP '  + h['base_q_idx'];
+  h['@extra'] += ' upd ' + ('refresh_frame_flags' in h?
+      h['refresh_frame_flags'] : '11111111');
+  if ('ref_frame_idx[0]' in h)
+    h['@extra'] += ' ref ' + h['ref_frame_idx[0]'] +
+        h['ref_frame_idx[1]'] + h['ref_frame_idx[2]'];
   this.store(h);
 }
 
@@ -648,7 +655,7 @@ bitstream_parser_h264.prototype.parse_nalu = function (bs) {
       nalu['use_ref_base_pic_flag'] = bs.u(1);
       nalu['discardable_flag'] = bs.u(1);
       nalu['output_flag'] = bs.u(1);
-      nalu['reserved_three_2bits'] = int2str(bs.u(2), 2, 2, '0');
+      nalu['reserved_three_2bits'] = int2str(bs.u(2), 2, 2, '0', 0);
     }
   }
   return nalu;
@@ -662,7 +669,7 @@ bitstream_parser_h264.prototype.parse_sps = function (bs, sps) {
   sps['constraint_set3_flag'] = bs.u(1);
   sps['constraint_set4_flag'] = bs.u(1);
   sps['constraint_set5_flag'] = bs.u(1);
-  sps['reserved_zero_2bits'] = int2str(bs.u(2), 2, 2, '0');
+  sps['reserved_zero_2bits'] = int2str(bs.u(2), 2, 2, '0', 0);
   sps['level_idc'] = bs.u(8);
   sps['seq_parameter_set_id'] = bs.ue();
   if (in_range(sps['profile_idc'], [100, 110, 122, 244, 44, 83, 86, 118, 128])) {
