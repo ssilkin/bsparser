@@ -13,6 +13,18 @@ function bitstream(buffer) {
   this.bits = 0;
   this.nbits = 0;
 
+  var trailing_zero_bytes = 0;
+  while (0 == this.buffer[this.length - 1 - trailing_zero_bytes]) {
+    trailing_zero_bytes++;
+  }
+
+  var trailing_zero_bits = 0;
+  while (0 == (this.buffer[this.length - 1 - trailing_zero_bytes] & (1 << trailing_zero_bits)) && trailing_zero_bits < 8) {
+    trailing_zero_bits++;
+  }
+
+  this.stopbit = 8 * (this.length - trailing_zero_bytes) - trailing_zero_bits;
+
   this.load = function () {
     while (this.nbits <= 24 && this.bytepos < this.length) {
       var onebyte = this.buffer[this.bytepos++];
@@ -228,6 +240,7 @@ file_parser_annexb.prototype.parse = function (buffer, addr) {
     } else {
       this.buffer[this.recv++] = byte;
       if (code == 1) {
+        this.recv -= 3;
         this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
         this.addr += this.recv + cnt3;
         this.recv = 0;
@@ -570,13 +583,26 @@ function bitstream_parser_h264(idoff) {
     , 'Unknown'
     , 'Unknown'
   ];
+
+  this.sei_payload_type = [
+    'buffering_period',
+    'pic_timing',
+    'pan_scan_rect',
+    'filler_payload',
+    'user_data_registered_itu_t_t35',
+    'user_data_unregistered',
+    'recovery_point',
+    'dec_ref_pic_marking_repetition'
+  ];
 }
 
 bitstream_parser_h264.prototype = new bitstream_parser_base();
 bitstream_parser_h264.prototype.parse = function (buffer, addr) {
   var bs = new bitstream(buffer);
   var h = this.parse_nalu(bs);
-  if (h['nal_unit_type'] == 7) {
+  if (h['nal_unit_type'] == 6) {
+    this.parse_sei(bs, h);
+  } else if (h['nal_unit_type'] == 7) {
     this.parse_sps(bs, h);
     h['@extra'] = (h['pic_width_in_mbs_minus1'] + 1) * 16 + 'x' +
       (2 - h['frame_mbs_only_flag']) * (h['pic_height_in_map_units_minus1'] + 1) * 16;
@@ -1046,4 +1072,29 @@ bitstream_parser_h264.prototype.parse_slice = function (bs, sh) {
       sh['scan_idx_end'] = bs.u(4);
     }
   }
+}
+
+bitstream_parser_h264.prototype.parse_sei = function (bs, h) {
+  var i = 0;
+  do {
+    var payload_type = 0;
+    do {
+      payload_type += bs.u(8);
+    } while(payload_type != 0 && (payload_type % 255) == 0);
+
+    var payload_size = 0;
+    do {
+      payload_size += bs.u(8);
+    } while(payload_size != 0 && (payload_size % 255) == 0);
+
+    h['payload_type['+i+']'] = payload_type;
+    h['payload_size['+i+']'] = payload_size;
+
+    if (payload_type < this.sei_payload_type.length) {
+      h['payload_type['+i+']'] += ' ' + this.sei_payload_type[payload_type];
+    }
+
+    bs.u(8 * payload_size);
+    ++i;
+  } while(more_rbsp_data(bs));
 }
