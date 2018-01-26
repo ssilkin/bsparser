@@ -613,11 +613,14 @@ bitstream_parser_h264.prototype.parse = function (buffer, addr) {
     h['@extra'] = h['entropy_coding_mode_flag'] ? 'CABAC' : 'CAVLC';
   } else if (in_range(h['nal_unit_type'], [1, 5, 20])) {
     this.parse_slice(bs, h);
-    h['@type'] = ['P', 'B', 'I', 'SP', 'SI'][h['slice_type'] % 5];
     h['@keyframe'] = h['nal_unit_type'] == 5 || (h['idr_flag'] || 0);
+    if (h['@keyframe'])
+      h['@type'] = 'IDR';
+    else
+      h['@type'] = ['P', 'B', 'I', 'SP', 'SI'][h['slice_type'] % 5];
   }
   h['@addr'] = addr;
-  if (!in_range(h['nal_unit_type'], [1, 5, 20]))
+  if (!('@type' in h))
     h['@type'] = this.nal_unit_type[h['nal_unit_type']];
   h['@length'] = buffer.length;
   this.store(h);

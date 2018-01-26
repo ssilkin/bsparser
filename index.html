@@ -57,7 +57,7 @@ function add(h) {
       str += '   ' + h["@extra"];
 
   var $elem = $("<span>", {id: "h" + h["@id"], text: str});
-  if (h['@keyframe'] || 0)
+  if ((h['@keyframe'] || 0) || h['@type'] == 'I')
     $elem.attr("style", 'color:red');
   $("#content").append($elem);
   $("#content").append("<br>");
