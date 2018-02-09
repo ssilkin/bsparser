@@ -22,6 +22,7 @@ pre {
 <script src="./parser.js"></script>
 <script>
 var parser = null;
+var header_num = 0;
 
 function open(file) {
   while (pos < length) {
@@ -53,8 +54,8 @@ function add(h) {
     $("#content").append(e);
   }*/
 
-  var str = "0x"
-    + tostr(h["@addr"], 16, 8, '0')
+  var str = padstr(tostr(header_num, 10, 5, ' '), 8, ' ', 1)
+    + "0x" + tostr(h["@addr"], 16, 8, '0')
     + tostr(h["@length"], 10, 8, ' ')
     + padstr(h["@type"], 8, ' ', false);
   if ("@extra" in h)
@@ -65,6 +66,8 @@ function add(h) {
     $elem.attr("style", 'color:red');
   $("#content").append($elem);
   $("#content").append("<br>");
+
+  header_num++;
 }
 
 function open(file) {

@@ -1,7 +1,7 @@
 function create_parser(fmt) {
   if (fmt == 'ivf')
     return new file_parser_ivf();
-  else if (fmt == '264')
+  else if (fmt.indexOf('264') >= 0)
     return new file_parser_annexb();
   return null;
 }
@@ -144,8 +144,9 @@ function file_parser_ivf() {
 
 file_parser_ivf.prototype = new file_parser_base();
 file_parser_ivf.prototype.parse = function (buffer) {
-  if (buffer == null)
+  if (buffer == null) {
     return;
+  }
   var pos = 0;
   while (pos < buffer.length) {
     if (this.need > 0) {
@@ -215,36 +216,37 @@ function file_parser_annexb() {
 
 file_parser_annexb.prototype = new file_parser_base();
 file_parser_annexb.prototype.parse = function (buffer, addr) {
-  if (buffer == null)
-    return;
-
-  var pos = 0;
-  if (this.first) {
-    while (pos < buffer.length) {
-      var byte = buffer[pos++];
-      this.addr++;
-      this.code = (this.code << 8) | byte;
-      if ((this.code & 0x00ffffff) == 1) {
-        this.first = false;
-        break;
+  if (buffer == null) {
+    this.parse(new Uint8Array([0, 0, 1]), addr);
+  } else {
+    var pos = 0;
+    if (this.first) {
+      while (pos < buffer.length) {
+        var byte = buffer[pos++];
+        this.addr++;
+        this.code = (this.code << 8) | byte;
+        if ((this.code & 0x00ffffff) == 1) {
+          this.first = false;
+          break;
+        }
       }
     }
-  }
 
-  var cnt3 = 0;
-  while (pos < buffer.length) {
-    var byte = buffer[pos++];
-    var code = (this.code = (this.code << 8) | byte) & 0x00ffffff;
-    if (code == 3) {
-      cnt3++;
-    } else {
-      this.buffer[this.recv++] = byte;
-      if (code == 1) {
-        this.recv -= 3;
-        this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
-        this.addr += this.recv + cnt3;
-        this.recv = 0;
-        cnt3 = 0;
+    var cnt3 = 0;
+    while (pos < buffer.length) {
+      var byte = buffer[pos++];
+      var code = (this.code = (this.code << 8) | byte) & 0x00ffffff;
+      if (code == 3) {
+        cnt3++;
+      } else {
+        this.buffer[this.recv++] = byte;
+        if (code == 1) {
+          this.recv -= 3;
+          this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
+          this.addr += this.recv + cnt3;
+          this.recv = 0;
+          cnt3 = 0;
+        }
       }
     }
   }
