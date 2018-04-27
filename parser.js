@@ -352,11 +352,11 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
         h['ref_frame_sign_bias[' + i + ']'] = bs.u(1);
       }
       for (ref_idx = 0; ref_idx < 3; ref_idx++) {
-        h['found_ref[' + ref_idx + ']'] = bs.u(1);
-        if (h['found_ref[' + ref_idx + ']'])
+        h['size_in_refs'] = bs.u(1);
+        if (h['size_in_refs'])
           break;
       }
-      if (ref_idx == 3) {
+      if (h['size_in_refs'] == 0) {
         h['frame_width_minus_1'] = bs.u(16);
         h['frame_height_minus_1'] = bs.u(16);
       }
@@ -402,44 +402,6 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
       h['delta_q[' + i + ']'] = bs.s(4);
   }
 
-  h['segmentation_enabled'] = bs.u(1);
-  if (h['segmentation_enabled']) {
-    h['segmentation_update_map'] = bs.u(1);
-    if (h['segmentation_update_map']) {
-      for (var i = 0; i < 7; i++) {
-        h['prob_coded[' + i + ']'] = bs.u(1);
-        if (h['prob_coded[' + i + ']'])
-          h['prob[' + i + ']'] = bs.u(8);
-      }
-      h['segmentation_temporal_update'] = bs.u(1);
-      if (h['segmentation_temporal_update']) {
-        for (var i = 0; i < 7; i++) {
-          h['prob_coded[' + i + ']'] = bs.u(1);
-          if (h['prob_coded[' + i + ']'])
-            h['prob[' + i + ']'] = bs.u(8);
-        }
-      }
-      h['segmentation_update_data'] = bs.u(1);
-      if (h['segmentation_update_data']) {
-        var MAX_SEGMENTS = 8;
-        var SEG_LVL_MAX = 4;
-        var segmentation_feature_bits = [8, 6, 2, 0];
-        var segmentation_feature_signed = [1, 1, 0, 0];
-        h['segmentation_abs_or_delta_update'] = bs.u(1);
-        for (var i = 0; i < MAX_SEGMENTS; i++) {
-          for (var j = 0; j < SEG_LVL_MAX; j++) {
-            h['feature_enabled[' + i + '][' + j + ']'] = bs.u(1);
-            if (h['feature_enabled[' + i + '][' + j + ']']) {
-              h['feature_value[' + i + '][' + j + ']'] = bs.u(segmentation_feature_bits[j]);
-              if (h['feature_value[' + i + '][' + j + ']'])
-                h['feature_sign[' + i + '][' + j + ']'] = bs.u(1);
-            }
-          }
-        }
-      }
-    }
-  }
-
   if ('frame_width_minus_1' in h) {
     h['@FrameWidth'] = h['frame_width_minus_1'] + 1;
     h['@FrameHeight'] = h['frame_height_minus_1'] + 1;
@@ -483,9 +445,11 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
       ' QP '  + h['base_q_idx'];
   h['@extra'] += ' upd ' + ('refresh_frame_flags' in h?
       h['refresh_frame_flags'] : '11111111');
-  if ('ref_frame_idx[0]' in h)
-    h['@extra'] += ' ref ' + h['ref_frame_idx[0]'] +
-        h['ref_frame_idx[1]'] + h['ref_frame_idx[2]'];
+  if ('ref_frame_idx[0]' in h) {
+    var ref_mask = (1 << h['ref_frame_idx[0]']) |
+        (1 << h['ref_frame_idx[1]']) | (1 << h['ref_frame_idx[2]']);
+    h['@extra'] += ' ref ' + int2str(ref_mask, 2, 8, '0', 0);
+  }
   this.store(h);
 }
 
