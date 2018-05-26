@@ -442,7 +442,7 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
   h['@keyframe'] = 1 - h['frame_type'];
   h['@extra'] = int2str(h['@FrameWidth'], 10, 4, ' ', 0) + 'x' +
       int2str(h['@FrameHeight'], 10, 4, ' ', 1) +
-      ' QP '  + h['base_q_idx'];
+      ' QP '  + int2str(h['base_q_idx'], 10, 3, ' ', 0);
   h['@extra'] += ' upd ' + ('refresh_frame_flags' in h?
       h['refresh_frame_flags'] : '11111111');
   if ('ref_frame_idx[0]' in h) {
