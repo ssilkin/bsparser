@@ -265,6 +265,7 @@ function bitstream_parser_base(idoff) {
   this.idoff = idoff;
   this.header = [];
   this.last = 0;
+  this.frame_num = 0;
 
   this.next = function() {
     if (this.last < this.header.length) return this.header[this.last++];
@@ -303,6 +304,7 @@ bitstream_parser_vp8.prototype.parse = function(buffer, addr) {
   h['@type'] = h['frame_type'] == 0 ? 'I' : 'P';
   h['@length'] = buffer.length;
   h['@keyframe'] = 1 - h['frame_type'];
+  h['@frame_num'] = this.frame_num++;
   this.store(h);
 };
 
@@ -449,6 +451,7 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
         (1 << h['ref_frame_idx[2]']);
     h['@extra'] += ' ref ' + int2str(ref_mask, 2, 8, '0', 0);
   }
+  h['@frame_num'] = this.frame_num++;
   this.store(h);
 };
 
@@ -506,6 +509,7 @@ bitstream_parser_av1.prototype.parse = function(buffer, addr) {
   h['@type'] = h['frame_type'] == 0 ? 'I' : 'P';
   h['@length'] = buffer.length;
   h['@keyframe'] = 1 - h['frame_type'];
+  h['@frame_num'] = this.frame_num++;
   this.store(h);
 };
 
@@ -576,6 +580,8 @@ bitstream_parser_h264.prototype.parse = function(buffer, addr) {
       h['@type'] = 'IDR';
     else
       h['@type'] = ['P', 'B', 'I', 'SP', 'SI'][h['slice_type'] % 5];
+    if (h['first_mb_in_slice'] == 0)
+      h['@frame_num'] = this.frame_num++;
   }
   h['@addr'] = addr;
   if (!('@type' in h)) h['@type'] = this.nal_unit_type[h['nal_unit_type']];
@@ -1155,6 +1161,8 @@ bitstream_parser_h265.prototype.parse = function(buffer, addr) {
     else
       h['@type'] = ['B', 'P', 'I'][h['slice_type']];
     h['@extra'] = this.nal_unit_type[h['nal_unit_type']];
+    if (h['first_slice_segment_in_pic_flag'])
+      h['@frame_num'] = this.frame_num++;
   }
 
   h['@addr'] = addr;

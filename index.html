@@ -2,7 +2,7 @@
 <head>
   <title>bsparser</title>
 </head>
-<style type="text/css">
+<style type='text/css'>
 * {
   font-family:monospace;
 }
@@ -13,16 +13,15 @@ pre {
 
 </style>
 <body>
-<div style="height: 0px;width: 0px; overflow:hidden;">
-  <input type="file" id="files">
+<div style='height: 0px;width: 0px; overflow:hidden;'>
+  <input type='file' id='files'>
 </div>
-<button id="open">Open</button>
-<pre id="content"></pre>
-<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.1.0/jquery.min.js"></script>
-<script src="./parser.js"></script>
+<button id='open'>Open</button>
+<pre id='content'></pre>
+<script src='https://ajax.googleapis.com/ajax/libs/jquery/3.1.0/jquery.min.js'></script>
+<script src='./parser.js'></script>
 <script>
 var parser = null;
-var header_num = 0;
 
 function open(file) {
   while (pos < length) {
@@ -44,30 +43,29 @@ function tostr(x, base, length, padding) {
 }
 
 function add(h) {
-  /*if (!($("#content").is(":parent"))) {
-    var e = "<span>"
-      + padstr("Addr",  10, ' ', 0)
-      + padstr("Length", 8, ' ', 0)
-      + padstr("Type",   8, ' ', 0)
-      + padstr("Extra",  8, ' ', 0)
-      + "</span><br>";
-    $("#content").append(e);
-  }*/
+  if (!($('#content').is(':parent'))) {
+    var e = '<span>'
+      + padstr('Frame',   5, ' ', false)
+      + padstr('Offset', 12, ' ', false)
+      + padstr('Length', 10, ' ', false)
+      + padstr('Type',    8, ' ', false)
+      + padstr('Info',    6, ' ', false)
+      + '</span><br>';
+    $('#content').append(e);
+  }
 
-  var str = padstr(tostr(header_num, 10, 5, ' '), 8, ' ', 1)
-    + "0x" + tostr(h["@addr"], 16, 8, '0')
-    + tostr(h["@length"], 10, 8, ' ')
-    + padstr(h["@type"], 8, ' ', false);
-  if ("@extra" in h)
-      str += '   ' + h["@extra"];
+  var str = (h['@frame_num'] != null? tostr(h['@frame_num'], 10, 5, ' ') : '     ')
+    + padstr('0x' + tostr(h['@addr'], 16, 8, '0'), 12, ' ', false)
+    + tostr(h['@length'], 10, 10, ' ')
+    + padstr(h['@type'], 8, ' ', false);
+  if ('@extra' in h)
+      str += '  ' + h['@extra'];
 
-  var $elem = $("<span>", {id: "h" + h["@id"], text: str});
+  var $elem = $('<span>', {id: 'h' + h['@id'], text: str});
   if ((h['@keyframe'] || 0) || h['@type'] == 'I')
-    $elem.attr("style", 'color:red');
-  $("#content").append($elem);
-  $("#content").append("<br>");
-
-  header_num++;
+    $elem.attr('style', 'color:red');
+  $('#content').append($elem);
+  $('#content').append('<br>');
 }
 
 function open(file) {
@@ -103,39 +101,39 @@ function open(file) {
   fr.readAsArrayBuffer(file);
 }
 
-$("#files").change(function(e) {
-  $("#open").remove();
+$('#files').change(function(e) {
+  $('#open').remove();
   open(e.target.files[0]);
 });
 
 $(document).ready(function() {
-  $("#content").click(function(evt) {
+  $('#content').click(function(evt) {
     var id = evt.target.id;
     if (id) {
-      if (id.substring(0, 1) == "h") {
-        var next = $(evt.target).next("span");
-        if (next.length && next[0].id && next[0].id.substring(0, 1) == "c") {
+      if (id.substring(0, 1) == 'h') {
+        var next = $(evt.target).next('span');
+        if (next.length && next[0].id && next[0].id.substring(0, 1) == 'c') {
           $(next[0]).remove();
         } else {
           id = parseInt(id.substring(1, id.length));
           var h = parser.get(id)
-          var elem = "<span id=\"c" + id + "\" style=\"color:gray\">";
+          var elem = '<span id=\'c' + id + '\' style=\'color:gray\'>';
           for (var k in h) {
-            if (k.substring(0, 1) != "@") {
+            if (k.substring(0, 1) != '@') {
               console.log(k, h[k]);
-              elem += "<br><span> " + padstr(k, 50, ' ', 1)
-                + h[k] + "</span>";
+              elem += '<br><span> ' + padstr(k, 50, ' ', 1)
+                + h[k] + '</span>';
             }
           }
-          elem += "</span>";
+          elem += '</span>';
           $(event.target).after(elem);
         }
       }
     }
   });
 
-  $("#open").click(function() {
-    $("#files").trigger("click");
+  $('#open').click(function() {
+    $('#files').trigger('click');
   });
 });
 </script>
