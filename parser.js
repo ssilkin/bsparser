@@ -1,3 +1,5 @@
+var g_headers = [];
+
 function create_parser(fmt) {
   if (fmt == 'ivf') {
     return new file_parser_ivf();
@@ -5,6 +7,8 @@ function create_parser(fmt) {
     return new file_parser_annexb('H264');
   } else if (['265', 'h265', 'hevc', 'bin'].indexOf(fmt) >= 0) {
     return new file_parser_annexb('H265');
+  } else if (['rtp'].indexOf(fmt) >= 0) {
+    return new file_parser_rtp();
   }
   return null;
 }
@@ -53,7 +57,8 @@ function bitstream(buffer) {
       this.nbits -= r;
       n -= r;
     }
-    return bits;
+    // To unsigned.
+    return bits >>> 0;
   };
 
   this.s = function(n) {
@@ -117,36 +122,36 @@ function in_range(x, array) {
   return array.indexOf(x) > -1 ? 1 : 0;
 }
 
-function file_parser_base() {
-  this.parser = 0;
+function store_header(h) {
+  h['@id'] = g_headers.length;
+  g_headers.push(h);
+}
+
+function file_parser_base(store) {
+  this.parser = null;
   this.buffer = new Uint8Array(1024 * 1024);
   this.recv = 0;
   this.addr = 0;
-  this.header = [];
-  this.last = 0;
-  this.idoff = 1000000;
-
-  this.store = function(h) {
-    h['@id'] = this.header.length;
-    this.header.push(h);
-  };
+  this.next_header_idx = 0;
 
   this.next = function() {
-    if (this.last < this.header.length) return this.header[this.last++];
-    if (this.parser) return this.parser.next();
+    if (this.next_header_idx < g_headers.length) {
+      return g_headers[this.next_header_idx++];
+    }
     return null;
   };
 
   this.get = function(id) {
-    if (id >= this.idoff) return this.parser.get(id);
-    return this.header[id];
+    return id < g_headers.length ? g_headers[id] : null;
   };
 }
 
 function file_parser_ivf() {
   file_parser_base.call(this);
-  this.goto = 2;
-  this.need = 8;
+  this.ivf_header_length = null;
+  this.ivf_header = null;
+  this.frame_size = null;
+  this.num_needed_bytes = 8;
 }
 
 file_parser_ivf.prototype = new file_parser_base();
@@ -156,45 +161,56 @@ file_parser_ivf.prototype.parse = function(buffer) {
   }
   var pos = 0;
   while (pos < buffer.length) {
-    if (this.need > 0) {
+    var num_read_bytes = Math.min(this.num_needed_bytes, buffer.length - pos);
+    for (var i = 0; i < num_read_bytes; ++i) {
       this.buffer[this.recv++] = buffer[pos++];
-      this.need--;
     }
-    if (this.need) continue;
 
-    if (this.goto == 0) {
-      this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
-      this.need = 12;
-      this.goto = 1;
-    } else if (this.goto == 1) {
-      this.need = bytes2dword(this.buffer, 0);
-      this.goto = 0;
-    } else if (this.goto == 2) {
-      this.need = bytes2word(this.buffer, 6) - 8;
-      this.goto = 3;
+    this.num_needed_bytes -= num_read_bytes;
+    if (this.num_needed_bytes) {
       continue;
-    } else if (this.goto == 3) {
-      var h = this.ivf_header(this.buffer, this.addr);
-      if (h['fourcc'] == 'VP80')
-        this.parser = new bitstream_parser_vp8(this.idoff);
-      else if (h['fourcc'] == 'VP90')
-        this.parser = new bitstream_parser_vp9(this.idoff);
-      else if (h['fourcc'] == 'AV01')
-        this.parser = new bitstream_parser_av1(this.idoff);
-      else if (h['fourcc'] == 'H264')
-        this.parser = new file_parser_annexb('H264');
-      else
-        alert('unknown fourcc ' + h['fourcc']);
-      this.store(h);
-      this.need = 12;
-      this.goto = 1;
     }
+
+    if (this.ivf_header_length == null) {
+      this.ivf_header_length = (this.buffer[7] << 8) | this.buffer[6];
+      this.num_needed_bytes = this.ivf_header_length - this.recv;
+      continue;
+    }
+
+    if (this.ivf_header == null) {
+      this.ivf_header = this.parse_ivf_header(this.buffer, this.addr);
+      var fourcc = this.ivf_header['fourcc'];
+      if (fourcc == 'VP80') {
+        this.parser = new bitstream_parser_vp8();
+      } else if (fourcc == 'VP90') {
+        this.parser = new bitstream_parser_vp9();
+      } else if (fourcc == 'AV01') {
+        this.parser = new bitstream_parser_av1();
+      } else if (fourcc == 'H264') {
+        this.parser = new file_parser_annexb('H264');
+      } else if (['H265', 'HEVC'].indexOf(fourcc) >= 0) {
+        this.parser = new file_parser_annexb('H265');
+      } else {
+        alert('Unknown FourCC ' + fourcc);
+      }
+
+      store_header(this.ivf_header);
+      this.num_needed_bytes = 12;
+    } else if (this.frame_size == null) {
+      this.frame_size = this.num_needed_bytes = (this.buffer[3] << 24) |
+          (this.buffer[2] << 16) | (this.buffer[1] << 8) | this.buffer[0];
+    } else if (this.parser != null) {
+      this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
+      this.num_needed_bytes = 12;
+      this.frame_size = null;
+    }
+
     this.addr += this.recv;
     this.recv = 0;
   }
 };
 
-file_parser_ivf.prototype.ivf_header = function(buffer, addr) {
+file_parser_ivf.prototype.parse_ivf_header = function(buffer, addr) {
   var h = {};
   h['signature'] = bytes2str(buffer.slice(0, 4));
   h['version'] = bytes2word(buffer, 4);
@@ -217,24 +233,29 @@ function file_parser_annexb(fourcc) {
   this.code = 0xffffffff;
   this.first = true;
   if (fourcc == 'H264') {
-    this.parser = new bitstream_parser_h264(this.idoff);
+    this.parser = new bitstream_parser_h264();
   } else if (fourcc == 'H265') {
-    this.parser = new bitstream_parser_h265(this.idoff);
+    this.parser = new bitstream_parser_h265();
   }
 }
 
 file_parser_annexb.prototype = new file_parser_base();
 file_parser_annexb.prototype.parse = function(buffer, addr) {
   if (buffer == null) {
-    this.parse(new Uint8Array([0, 0, 1]), addr);
+    if (!this.first && this.recv > 0) {
+      this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
+      this.code = 0xffffffff;
+      this.first = true;
+      this.recv = 0;
+    }
   } else {
     var pos = 0;
     if (this.first) {
       while (pos < buffer.length) {
         var byte = buffer[pos++];
         this.addr++;
-        this.code = (this.code << 8) | byte;
-        if ((this.code & 0x00ffffff) == 1) {
+        this.code = ((this.code << 8) | byte) & 0x00ffffff;
+        if (this.code == 1) {
           this.first = false;
           break;
         }
@@ -243,13 +264,16 @@ file_parser_annexb.prototype.parse = function(buffer, addr) {
 
     var cnt3 = 0;
     while (pos < buffer.length) {
+      if (this.code == 1 && addr !== undefined) {
+        this.addr = addr + pos;
+      }
       var byte = buffer[pos++];
-      var code = (this.code = (this.code << 8) | byte) & 0x00ffffff;
-      if (code == 3) {
+      this.code = ((this.code << 8) | byte) & 0x00ffffff;
+      if (this.code == 3) {
         cnt3++;
       } else {
         this.buffer[this.recv++] = byte;
-        if (code == 1) {
+        if (this.code == 1) {
           this.recv -= 3;
           this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
           this.addr += this.recv + cnt3;
@@ -261,32 +285,10 @@ file_parser_annexb.prototype.parse = function(buffer, addr) {
   }
 };
 
-function bitstream_parser_base(idoff) {
-  this.idoff = idoff;
-  this.header = [];
-  this.last = 0;
+function bitstream_parser_vp8() {
   this.frame_num = 0;
+};
 
-  this.next = function() {
-    if (this.last < this.header.length) return this.header[this.last++];
-    return null;
-  };
-
-  this.get = function(id) {
-    return this.header[id - this.idoff];
-  };
-
-  this.store = function(h) {
-    h['@id'] = this.header.length + this.idoff;
-    this.header.push(h);
-  };
-}
-
-function bitstream_parser_vp8(idoff) {
-  bitstream_parser_base.call(this, idoff);
-}
-
-bitstream_parser_vp8.prototype = new bitstream_parser_base();
 bitstream_parser_vp8.prototype.parse = function(buffer, addr) {
   var bs = new bitstream(buffer);
   var h = {};
@@ -305,14 +307,13 @@ bitstream_parser_vp8.prototype.parse = function(buffer, addr) {
   h['@length'] = buffer.length;
   h['@keyframe'] = 1 - h['frame_type'];
   h['@frame_num'] = this.frame_num++;
-  this.store(h);
+  store_header(h);
 };
 
-function bitstream_parser_vp9(idoff) {
-  bitstream_parser_base.call(this, idoff);
+function bitstream_parser_vp9() {
+  this.frame_num = 0;
 }
 
-bitstream_parser_vp9.prototype = new bitstream_parser_base();
 bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
   var bs = new bitstream(buffer);
   var h = {};
@@ -411,10 +412,8 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
     h['@FrameHeight'] = h['frame_height_minus_1'] + 1;
   } else {
     var ref = this.find_ref(h['ref_frame_idx[' + ref_idx + ']']);
-    if (ref) {
-      h['@FrameWidth'] = ref['@FrameWidth'];
-      h['@FrameHeight'] = ref['@FrameHeight'];
-    }
+    h['@FrameWidth'] = ref['@FrameWidth'];
+    h['@FrameHeight'] = ref['@FrameHeight'];
   }
   var MiCols = (h['@FrameWidth'] + 7) >> 3;
   var MiRows = (h['@FrameHeight'] + 7) >> 3;
@@ -437,6 +436,7 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
 
   h['header_size_in_bytes'] = bs.u(16);
 
+  h['@vp9'] = 1;
   h['@addr'] = addr;
   h['@type'] = h['frame_type'] == 0 ? 'I' : 'P';
   h['@length'] = buffer.length;
@@ -452,7 +452,7 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
     h['@extra'] += ' ref ' + int2str(ref_mask, 2, 8, '0', 0);
   }
   h['@frame_num'] = this.frame_num++;
-  this.store(h);
+  store_header(h);
 };
 
 bitstream_parser_vp9.prototype.color_config = function(h, bs) {
@@ -480,19 +480,18 @@ bitstream_parser_vp9.prototype.color_config = function(h, bs) {
 };
 
 bitstream_parser_vp9.prototype.find_ref = function(idx) {
-  for (var i = this.header.length - 1; i >= 0; i--) {
-    if (!('refresh_frame_flags' in this.header[i]) ||
-        this.header[i]['refresh_frame_flags'] & (1 << idx))
-      return this.header[i];
+  for (var i = g_headers.length - 1; i >= 0; i--) {
+    var h = g_headers[i];
+    if (('@vp9' in h) &&
+        (!('refresh_frame_flags' in h) ||
+         (h['refresh_frame_flags'] & (1 << idx)))) {
+      return g_headers[i];
+    }
   }
   return null;
 };
 
-function bitstream_parser_av1(idoff) {
-  bitstream_parser_base.call(this, idoff);
-}
-
-bitstream_parser_av1.prototype = new bitstream_parser_base();
+function bitstream_parser_av1(){};
 bitstream_parser_av1.prototype.parse = function(buffer, addr) {
   var bs = new bitstream(buffer);
   var h = {};
@@ -510,11 +509,10 @@ bitstream_parser_av1.prototype.parse = function(buffer, addr) {
   h['@length'] = buffer.length;
   h['@keyframe'] = 1 - h['frame_type'];
   h['@frame_num'] = this.frame_num++;
-  this.store(h);
+  store_header(h);
 };
 
-function bitstream_parser_h264(idoff) {
-  bitstream_parser_base.call(this, idoff);
+function bitstream_parser_h264() {
   this.nal_unit_type = [
     'Unknown',
     'Slice',
@@ -555,9 +553,10 @@ function bitstream_parser_h264(idoff) {
     'user_data_registered_itu_t_t35', 'user_data_unregistered',
     'recovery_point', 'dec_ref_pic_marking_repetition'
   ];
+
+  this.frame_num = 0;
 }
 
-bitstream_parser_h264.prototype = new bitstream_parser_base();
 bitstream_parser_h264.prototype.parse = function(buffer, addr) {
   var bs = new bitstream(buffer);
   var h = this.parse_nalu(bs);
@@ -576,26 +575,34 @@ bitstream_parser_h264.prototype.parse = function(buffer, addr) {
   } else if (in_range(h['nal_unit_type'], [1, 5, 20])) {
     this.parse_slice(bs, h);
     h['@keyframe'] = h['nal_unit_type'] == 5 || (h['idr_flag'] || 0);
-    if (h['@keyframe'])
+    if (h['@keyframe']) {
       h['@type'] = 'IDR';
-    else
+    } else {
       h['@type'] = ['P', 'B', 'I', 'SP', 'SI'][h['slice_type'] % 5];
-    if (h['first_mb_in_slice'] == 0)
+    }
+    h['@extra'] = 'frame_num ' + h['frame_num'];
+    if (h['first_mb_in_slice'] == 0) {
       h['@frame_num'] = this.frame_num++;
+    }
   }
+
+  if (!('@type' in h)) {
+    h['@type'] = this.nal_unit_type[h['nal_unit_type']];
+  }
+
   h['@addr'] = addr;
-  if (!('@type' in h)) h['@type'] = this.nal_unit_type[h['nal_unit_type']];
   h['@length'] = buffer.length;
-  this.store(h);
+  h['@data'] = buffer;
+  store_header(h);
 };
 
 bitstream_parser_h264.prototype.find_nalu = function(type, key, value) {
-  for (var i = this.header.length - 1; i >= 0; i--) {
-    if (in_range(this.header[i]['nal_unit_type'], type)) {
-      if (key == null)
-        return this.header[i];
-      else if (this.header[i][key] == value)
-        return this.header[i];
+  for (var i = g_headers.length - 1; i >= 0; i--) {
+    var h = g_headers[i];
+    if ('nal_unit_type' in h && in_range(h['nal_unit_type'], type)) {
+      if (key == null || h[key] == value) {
+        return h;
+      }
     }
   }
   return null;
@@ -1086,8 +1093,7 @@ bitstream_parser_h264.prototype.parse_sei = function(bs, h) {
   } while (more_rbsp_data(bs));
 };
 
-function bitstream_parser_h265(idoff) {
-  bitstream_parser_base.call(this, idoff);
+function bitstream_parser_h265() {
   this.nal_unit_type = [
     'TRAIL_N',
     'TRAIL_R',
@@ -1135,9 +1141,10 @@ function bitstream_parser_h265(idoff) {
     'UNSPEC48',
     'UNSPEC63'
   ];
+
+  this.frame_num = 0;
 }
 
-bitstream_parser_h265.prototype = new bitstream_parser_base();
 bitstream_parser_h265.prototype.parse = function(buffer, addr) {
   var bs = new bitstream(buffer);
   var h = this.parse_nalu(bs);
@@ -1168,16 +1175,16 @@ bitstream_parser_h265.prototype.parse = function(buffer, addr) {
   h['@addr'] = addr;
   if (!('@type' in h)) h['@type'] = this.nal_unit_type[h['nal_unit_type']];
   h['@length'] = buffer.length;
-  this.store(h);
+  store_header(h);
 };
 
 bitstream_parser_h265.prototype.find_nalu = function(type, key, value) {
-  for (var i = this.header.length - 1; i >= 0; i--) {
-    if (in_range(this.header[i]['nal_unit_type'], type)) {
-      if (key == null)
-        return this.header[i];
-      else if (this.header[i][key] == value)
-        return this.header[i];
+  for (var i = g_headers.length - 1; i >= 0; i--) {
+    var h = g_headers[i];
+    if ('nal_unit_type' in h && in_range(h['nal_unit_type'], type)) {
+      if (key == null || h[key] == value) {
+        return h;
+      }
     }
   }
   return null;
@@ -2168,9 +2175,9 @@ bitstream_parser_h265.prototype.colour_mapping_octants = function(
       for (var m = 0; m < 2; m++)
         for (var n = 0; n < 2; n++)
           this.colour_mapping_octants(
-              pps, inpDepth + 1, idxY + PartNumY * k * inpLength / 2,
-              idxCb + m * inpLength / 2, idxCr + n * inpLength / 2,
-              inpLength / 2);
+              pps, inpDepth + 1, idxY + ((PartNumY * k * inpLength) >> 1),
+              idxCb + ((m * inpLength) >> 1), idxCr + ((n * inpLength) >> 1),
+              inpLength >> 1);
   else
     for (var i = 0; i < 1 << pps['cm_y_part_num_log2']; i++) {
       var idxShiftY = idxY + (i << (pps['cm_octant_depth'] - inpDepth));
@@ -2601,4 +2608,242 @@ bitstream_parser_h265.prototype.slice_segment_header = function(bs, sh) {
 bitstream_parser_h265.prototype.parse_sei = function(bs) {
   var seis = {};
   return seis;
+};
+
+function file_parser_rtp() {
+  file_parser_base.call(this);
+  this.rtpdump_signature = null;
+  this.rtpdump_rd_hdr = null;
+  this.rtpdump_rd_packet = null;
+  this.known_pt = {
+    98: {
+      'parser': new file_parser_rtp_h264(),
+      'last_seq_num': null,
+    },
+  };
+  this.num_needed_bytes = 1;
+}
+
+file_parser_rtp.prototype = new file_parser_base();
+file_parser_rtp.prototype.parse = function(buffer) {
+  if (buffer == null) {
+    return;
+  }
+
+  var pos = 0;
+  while (pos < buffer.length) {
+    var num_read_bytes = Math.min(this.num_needed_bytes, buffer.length - pos);
+    for (var i = 0; i < num_read_bytes; ++i) {
+      this.buffer[this.recv++] = buffer[pos++];
+    }
+
+    this.num_needed_bytes -= num_read_bytes;
+    if (this.num_needed_bytes) {
+      continue;
+    }
+
+    if (this.rtpdump_signature == null) {
+      if (String.fromCharCode(this.buffer[this.recv - 1]) != '\n') {
+        this.num_needed_bytes = 1;
+        continue;
+      } else {
+        this.rtpdump_signature = bytes2str(this.buffer.slice(0, -1));
+        this.num_needed_bytes = 16;
+      }
+    } else {
+      var bs = new bitstream(this.buffer.slice(0, this.recv));
+      if (this.rtpdump_rd_hdr == null) {
+        this.rtpdump_rd_hdr = this.parse_rd_hrd(bs);
+        this.num_needed_bytes = 8;
+      } else if (this.rtpdump_rd_packet == null) {
+        this.rtpdump_rd_packet = this.parse_rd_packet(bs);
+        this.num_needed_bytes = this.rtpdump_rd_packet['length'] - 8;
+      } else {
+        var rtp_header = this.parse_rtp_packet(bs);
+        rtp_header['@addr'] = this.addr;
+
+        var rtp_header_length = bs.bitpos() >> 3;
+        var num_show_bytes =
+            Math.min(16, (this.buffer.length - rtp_header_length) >> 2);
+        if (num_show_bytes > 0) {
+          var str = '';
+          for (var i = 0; i < num_show_bytes; ++i) {
+            str += int2str(this.buffer[rtp_header_length + i], 16, 8, '', 0);
+          }
+          rtp_header['payload_data'] = str;
+        }
+
+        if (rtp_header['payload_type'] in this.known_pt) {
+          var pt = this.known_pt[rtp_header['payload_type']];
+          if (pt.last_seq_num != null) {
+            var expected_seq_num = (pt.last_seq_num + 1) % 0xffff;
+            if (rtp_header['seq_num'] != expected_seq_num) {
+              var h = {};
+              h['@error'] = 'Gap in seq_num ' + pt.last_seq_num + '...' +
+                  rtp_header['seq_num'];
+              store_header(h);
+            }
+          }
+
+          pt.last_seq_num = rtp_header['seq_num'];
+        }
+
+        store_header(rtp_header);
+
+        if (rtp_header['payload_type'] in this.known_pt) {
+          pt.parser.parse(
+              this.buffer.slice(bs.bitpos() >> 3, this.recv),
+              this.addr + rtp_header_length, this.store);
+        }
+
+        this.rtpdump_rd_packet = null;
+        this.num_needed_bytes = 8;
+      }
+    }
+
+    this.addr += this.recv;
+    this.recv = 0;
+  }
+};
+
+file_parser_rtp.prototype.parse_rd_hrd = function(bs) {
+  var h = {};
+  h['start_sec'] = bs.u(32);
+  h['start_usec'] = bs.u(32);
+  h['source'] = bs.u(32);
+  h['port'] = bs.u(16);
+  bs.u(16);  // padding
+  h['@type'] = 'RD_hdr';
+  h['@length'] = 16;
+  return h;
+};
+
+file_parser_rtp.prototype.parse_rd_packet = function(bs) {
+  var h = {};
+  h['length'] = bs.u(16);
+  h['plen'] = bs.u(16);
+  h['offset'] = bs.u(32);
+  h['@type'] = 'RD_packet';
+  h['@length'] = 8;
+  return h;
+};
+
+file_parser_rtp.prototype.parse_rtp_packet = function(bs) {
+  var h = {};
+  h['version'] = bs.u(2);
+  h['padding'] = bs.u(1);
+  h['extension'] = bs.u(1);
+  h['csrc_count'] = bs.u(4);
+  h['marker'] = bs.u(1);
+  h['payload_type'] = bs.u(7);
+  h['seq_num'] = bs.u(16);
+  h['timestamp'] = bs.u(32);
+  h['ssrc'] = bs.u(32);
+  bs.u(h['csrc_count'] * 32);
+
+  if (h['extension']) {
+    h['ext_type'] = '0x' + int2str(bs.u(16), 16, 4, '0');
+    h['ext_len'] = bs.u(16);
+    bs.u(h['ext_len'] * 32);
+  }
+
+  h['@type'] = 'RTP';
+  h['@length'] = bs.length;
+  h['@extra'] = int2str(h['payload_type'], 10, 3, ' ', 0) + ' ' +
+      int2str(h['seq_num'], 10, 5, ' ');
+  return h;
+};
+
+function file_parser_rtp_h264() {
+  this.annexb_parser = new file_parser_annexb('H264');
+  this.num_needed_bytes = 1;
+}
+
+file_parser_rtp_h264.prototype.parse = function(buffer, addr) {
+  if (buffer == null) {
+    this.annexb_parser.parse(null, addr);
+    this.num_needed_bytes = 1;
+  } else {
+    var nal_unit_type = buffer[0] & 0x1f;
+    if (nal_unit_type == 24) {
+      // STAP-A
+      var pos = 1;
+      while (pos + 3 < buffer.length) {
+        var nal_unit_size = (buffer[pos++] << 8) | buffer[pos++];
+        this.annexb_parser.parse(new Uint8Array([0, 0, 1]));
+        this.annexb_parser.parse(
+            buffer.slice(pos, pos + nal_unit_size), addr + pos);
+        this.annexb_parser.parse(null);
+        pos += nal_unit_size;
+      }
+    } else if (nal_unit_type == 28) {
+      // FU-A
+      var fu_header = buffer[1];
+      var start_bit = fu_header & 0x80;
+      var end_bit = fu_header & 0x40;
+
+      if (start_bit) {
+        var nalu_header = (buffer[0] & 0xe0) | (buffer[1] & 0x1f);
+        this.annexb_parser.parse(new Uint8Array([0, 0, 1, nalu_header]), addr);
+      }
+      this.annexb_parser.parse(buffer.slice(2));
+      if (end_bit) {
+        this.annexb_parser.parse(null);
+      }
+    } else {
+      this.annexb_parser.parse(new Uint8Array([0, 0, 1]));
+      this.annexb_parser.parse(buffer, addr);
+      this.annexb_parser.parse(null);
+    }
+  }
+};
+
+file_parser_rtp.prototype.parse_vp8_payload_descriptor = function(bs) {
+  var h = {};
+  h['X'] = bs.u(1);
+  h['R'] = bs.u(1);
+  h['N'] = bs.u(1);
+  h['S'] = bs.u(1);
+  h['PartID'] = bs.u(4);
+
+  if (h['X']) {
+    h['I'] = bs.u(1);
+    h['L'] = bs.u(1);
+    h['T'] = bs.u(1);
+    h['K'] = bs.u(1);
+    h['RSV'] = bs.u(4);
+
+    if (h['I']) h['PictureID'] = bs.u(8);
+    if (h['L']) h['TL0PICIDX'] = bs.u(8);
+
+    if (h['T'] || h['K']) {
+      var TID = bs.u(2);
+      var Y = bs.u(1);
+      var KEYIDX = bs.u(5);
+      if (h['T']) {
+        h['TID'] = TID;
+        h['Y'] = Y;
+      }
+      if ('K') h['KEYIDX'] = KEYIDX;
+    }
+  }
+
+  h['@type'] = 'VP8 PD';
+  h['@length'] = bs.length;
+  h['@extra'] = h['S'];
+  return h;
+};
+
+file_parser_rtp.prototype.parse_generic_payload_descriptor = function(bs) {
+  var h = {};
+  bs.u(5);
+  h['ext'] = bs.u(1);
+  h['key'] = bs.u(1);
+  h['first'] = bs.u(1);
+  if (h['ext']) h['pid'] = bs.u(16);
+  h['@type'] = 'Generic PD';
+  h['@length'] = bs.length;
+  h['@extra'] = 'key ' + h['key'];
+  if (h['ext']) h['@extra'] += ' pid' + h['pid'];
+  return h;
 };
