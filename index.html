@@ -48,7 +48,7 @@ function add(h) {
       + padstr('Frame',   5, ' ', false)
       + padstr('Offset', 10, ' ', false)
       + padstr('Length', 10, ' ', false)
-      + padstr('Type',    8, ' ', false)
+      + padstr('Type',   25, ' ', false)
       + padstr('Info',    6, ' ', false)
       + '</span><br>';
     $('#content').append(e);
@@ -59,7 +59,7 @@ function add(h) {
     str = ('@frame_num' in h? tostr(h['@frame_num'], 10, 5, ' ') : '     ')
       + padstr(tostr(h['@addr'], 16, 8, '0'), 10, ' ', false)
       + tostr(h['@length'], 10, 10, ' ')
-      + padstr(h['@type'], 8, ' ', false);
+      + padstr(h['@type'], 25, ' ', false);
     if ('@extra' in h) {
       str += '  ' + h['@extra'];
     }
@@ -145,47 +145,21 @@ $(document).ready(function() {
   });
   $('#menu').append($open);
 
-  var $map = $('<input>', {type: 'text', id: 'map', css: {width:'15ch'}});
-  $map.val('pt=98:H264');
-  $map.keydown(function(key) {
-    key.stopPropagation();
-    if (key.which == 13) {
-      var fmt = $(this).val().toLowerCase();
-      var m = fmt.match(/pt=(\d:\w)/);
-      if (m) {
-        g_ctx.pt_map = {};
-        g_ctx.pt_map[parseInt(m[1])] = m[2];
-      }
-
-      if (g_readers.length) {
-        g_readers[g_ctx.reader_idx].open(
-            g_readers[g_ctx.reader_idx].file,
-            function(success) {
-              update_ctx();
-              seek(g_ctx.frame_num);
-            },
-            g_ctx.default_width,
-            g_ctx.default_height,
-            g_ctx.default_pix_fmt,
-            true);
-      }
-    }
-  });
-  $('#menu').append($map);
-
   $('#content').click(function(evt) {
     var id = evt.target.id;
     if (id) {
       if (id.substring(0, 1) == 'h') {
         var next = $(evt.target).next('span');
         if (next.length && next[0].id && next[0].id.substring(0, 1) == 'c') {
+          // Hide content on second click.
           $(next[0]).remove();
         } else {
           id = parseInt(id.substring(1, id.length));
-          var h = g_ctx.parser.get(id)
+          var h = g_ctx.parser.get(id);
           var elem = '<span id=\'c' + id + '\' style=\'color:gray\'>';
           for (var k in h) {
-            if (k.substring(0, 1) != '@') {
+            var startswith = k.substring(0, 1);
+            if (startswith != '@' && startswith != '#') {
               console.log(k, h[k]);
               elem += '<br><span> ' + padstr(k, 50, ' ', 1)
                 + h[k] + '</span>';

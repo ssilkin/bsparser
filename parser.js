@@ -1,5 +1,6 @@
 var g_headers = [];
 
+//exports.create_parser = function(fmt) {
 function create_parser(fmt) {
   if (fmt == 'ivf') {
     return new file_parser_ivf();
@@ -7,11 +8,9 @@ function create_parser(fmt) {
     return new file_parser_annexb('H264');
   } else if (['265', 'h265', 'hevc', 'bin'].indexOf(fmt) >= 0) {
     return new file_parser_annexb('H265');
-  } else if (['rtp'].indexOf(fmt) >= 0) {
-    return new file_parser_rtp();
   }
   return null;
-}
+};
 
 function bitstream(buffer) {
   this.buffer = buffer;
@@ -44,6 +43,10 @@ function bitstream(buffer) {
 
   this.bitpos = function() {
     return 8 * this.bytepos - this.nbits;
+  };
+
+  this.bitsleft = function() {
+    return this.length * 8 - this.bitpos();
   };
 
   this.u = function(n) {
@@ -85,6 +88,52 @@ function bitstream(buffer) {
     var codeval = (codenum + 1) >> 1;
     return (codenum & 1) ? codeval : -codeval;
   };
+
+  this.uvlc = function() {
+    var leading_zeros = 0;
+    while (!this.u(1)) {
+      ++leading_zeros;
+    }
+    if (leading_zeros >= 32) {
+      return (1 << 32) - 1;
+    }
+    return this.u(leading_zeros) + (1 << leading_zeros) - 1;
+  };
+
+  this.le = function(n) {
+    var val = 0;
+    for (var i = 0; i < n; ++i) {
+      val += bs.u(8) << (i * 8);
+    }
+    return val;
+  };
+
+  this.leb128 = function() {
+    var val = 0;
+    for (var i = 0; i < 8; ++i) {
+      var byte = this.u(8);
+      val |= (byte & 0x7f) << (i * 7);
+      if (!(byte & 0x80)) break;
+    }
+    return val;
+  };
+
+  this.ns = function(n) {
+    var w = cntbits(n);
+    var m = (1 << w) - n;
+    var v = this.u(w - 1);
+    if (v < m) return v;
+    var extra_bit = this.u(1);
+    return (v << 1) - m + extra_bit;
+  };
+
+  this.su = function(n) {
+    var v = this.u(n);
+    var s = 1 << (n - 1)
+    if (v & s)
+      return v - 2 * s;
+    return v;
+  }
 }
 
 function int2str(x, base, length, padding, padend) {
@@ -122,12 +171,16 @@ function in_range(x, array) {
   return array.indexOf(x) > -1 ? 1 : 0;
 }
 
+function clip(num, min, max) {
+  return num <= min ? min : num >= max ? max : num;
+}
+
 function store_header(h) {
   h['@id'] = g_headers.length;
   g_headers.push(h);
 }
 
-function file_parser_base(store) {
+function file_parser_base() {
   this.parser = null;
   this.buffer = new Uint8Array(1024 * 1024);
   this.recv = 0;
@@ -343,7 +396,7 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
       h['frame_sync_bytes'] = bs.u(8) + ', ' + bs.u(8) + ', ' + bs.u(8);
       if (h['profile'] > 0) {
         this.color_config(h, bs);
-        h['refresh_frame_flags'] = int2str(bs.u(8), 2, 8, '0', 0);
+        h['refresh_frame_flags'] = bs.u(8);
         h['frame_width_minus_1'] = bs.u(16);
         h['frame_height_minus_1'] = bs.u(16);
         h['render_and_frame_size_different'] = bs.u(1);
@@ -353,7 +406,7 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
         }
       }
     } else {
-      h['refresh_frame_flags'] = int2str(bs.u(8), 2, 8, '0', 0);
+      h['refresh_frame_flags'] = bs.u(8);
       for (var i = 0; i < 3; i++) {
         h['ref_frame_idx[' + i + ']'] = bs.u(3);
         h['ref_frame_sign_bias[' + i + ']'] = bs.u(1);
@@ -408,15 +461,15 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
   }
 
   if ('frame_width_minus_1' in h) {
-    h['@FrameWidth'] = h['frame_width_minus_1'] + 1;
-    h['@FrameHeight'] = h['frame_height_minus_1'] + 1;
+    h['#FrameWidth'] = h['frame_width_minus_1'] + 1;
+    h['#FrameHeight'] = h['frame_height_minus_1'] + 1;
   } else {
     var ref = this.find_ref(h['ref_frame_idx[' + ref_idx + ']']);
-    h['@FrameWidth'] = ref['@FrameWidth'];
-    h['@FrameHeight'] = ref['@FrameHeight'];
+    h['#FrameWidth'] = ref['#FrameWidth'];
+    h['#FrameHeight'] = ref['#FrameHeight'];
   }
-  var MiCols = (h['@FrameWidth'] + 7) >> 3;
-  var MiRows = (h['@FrameHeight'] + 7) >> 3;
+  var MiCols = (h['#FrameWidth'] + 7) >> 3;
+  var MiRows = (h['#FrameHeight'] + 7) >> 3;
   var Sb64Cols = (MiCols + 7) >> 3;
   var Sb64Rows = (MiRows + 7) >> 3;
   var minLog2TileCols = 0;
@@ -436,13 +489,12 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
 
   h['header_size_in_bytes'] = bs.u(16);
 
-  h['@vp9'] = 1;
   h['@addr'] = addr;
   h['@type'] = h['frame_type'] == 0 ? 'I' : 'P';
   h['@length'] = buffer.length;
   h['@keyframe'] = 1 - h['frame_type'];
-  h['@extra'] = int2str(h['@FrameWidth'], 10, 4, ' ', 0) + 'x' +
-      int2str(h['@FrameHeight'], 10, 4, ' ', 1) + ' QP ' +
+  h['@extra'] = int2str(h['#FrameWidth'], 10, 4, ' ', 0) + 'x' +
+      int2str(h['#FrameHeight'], 10, 4, ' ', 1) + ' QP ' +
       int2str(h['base_q_idx'], 10, 3, ' ', 0);
   h['@extra'] += ' upd ' +
       ('refresh_frame_flags' in h ? h['refresh_frame_flags'] : '11111111');
@@ -482,34 +534,1183 @@ bitstream_parser_vp9.prototype.color_config = function(h, bs) {
 bitstream_parser_vp9.prototype.find_ref = function(idx) {
   for (var i = g_headers.length - 1; i >= 0; i--) {
     var h = g_headers[i];
-    if (('@vp9' in h) &&
-        (!('refresh_frame_flags' in h) ||
-         (h['refresh_frame_flags'] & (1 << idx)))) {
+    if (!('refresh_frame_flags' in h) ||
+        (h['refresh_frame_flags'] & (1 << idx))) {
       return g_headers[i];
     }
   }
   return null;
 };
 
-function bitstream_parser_av1(){};
+function bitstream_parser_av1() {
+  this.obu_types = [
+    'Reserved',
+    'OBU_SEQUENCE_HEADER',
+    'OBU_TEMPORAL_DELIMITER',
+    'OBU_FRAME_HEADER',
+    'OBU_TILE_GROUP',
+    'OBU_METADATA',
+    'OBU_FRAME',
+    'OBU_REDUNDANT_FRAME_HEADER',
+    'OBU_TILE_LIST',
+    'Reserved',
+    'Reserved',
+    'Reserved',
+    'Reserved',
+    'Reserved',
+    'Reserved',
+    'OBU_PADDING',
+  ];
+
+  this.frame_type =
+      {KEY_FRAME: 0, INTER_FRAME: 1, INTRA_ONLY_FRAME: 2, SWITCH_FRAME: 3};
+
+  this.ref_frame_type = {
+    NONE: -1,
+    INTRA_FRAME: 0,
+    LAST_FRAME: 1,
+    LAST2_FRAME: 2,
+    LAST3_FRAME: 3,
+    GOLDEN_FRAME: 4,
+    BWDREF_FRAME: 5,
+    ALTREF2_FRAME: 6,
+    ALTREF_FRAME: 7
+  };
+
+  this.NUM_REF_FRAMES = 8;
+  this.REFS_PER_FRAME = 7;
+  this.SELECT_SCREEN_CONTENT_TOOLS = 2;
+  this.SELECT_INTEGER_MV = 2;
+  this.PRIMARY_REF_NONE = 7;
+  this.MAX_SEGMENTS = 8;
+  this.IDENTITY = 0;
+  this.TRANSLATION = 1;
+  this.ROTZOOM = 2;
+  this.AFFINE = 3;
+  this.WARPEDMODEL_PREC_BITS = 16;
+
+  this.SeenFrameHeader = 0;
+  this.FeatureEnabled = Array.from(Array(8), () => new Array(8).fill(0));
+  this.FeatureData = Array.from(Array(8), () => new Array(8).fill(0));
+
+  this.frame_num = 0;
+  this.seq_header = null;
+};
 bitstream_parser_av1.prototype.parse = function(buffer, addr) {
   var bs = new bitstream(buffer);
+  while (bs.bitsleft() >> 3) {
+    var obu_header_bitpos = bs.bitpos();
+    var h = this.parse_obu_header(bs);
+    var payload_bitpos = bs.bitpos();
+    if (h['obu_type'] == 1) {
+      this.sequence_header_obu(bs, h);
+      this.seq_header = h;
+      h['@extra'] = (h['max_frame_width_minus_1'] + 1) + 'x' +
+          (h['max_frame_height_minus_1'] + 1);
+    } else if (h['obu_type'] == 2) {
+      this.SeenFrameHeader = 0;
+    } else if (h['obu_type'] == 6) {
+      this.frame_obu(bs, h);
+      h['@keyframe'] = h['#FrameIsIntra'];
+      h['@frame_num'] = this.frame_num++;
+    }
+
+    h['@addr'] = addr + (obu_header_bitpos >> 3);
+    h['@type'] = this.obu_types[h['obu_type']];
+    h['@length'] = (bs.bitpos() - obu_header_bitpos) >> 3;
+    store_header(h);
+
+    if ('obu_size' in h) {
+      var payload_bits = bs.bitpos() - payload_bitpos;
+      var trailing_bits = h['obu_size'] * 8 - payload_bits;
+      if (trailing_bits > 0) bs.u(trailing_bits);
+    } else {
+      break;
+    }
+  }
+};
+
+bitstream_parser_av1.prototype.find_ref = function(idx) {
+  for (var i = g_headers.length - 1; i >= 0; i--) {
+    var h = g_headers[i];
+    if (!('refresh_frame_flags' in h) ||
+        (h['refresh_frame_flags'] & (1 << idx))) {
+      return g_headers[i];
+    }
+  }
+  return null;
+};
+
+bitstream_parser_av1.prototype.parse_obu_header =
+    function(bs) {
   var h = {};
-  h['frame_marker'] = bs.u(2);
-  h['profile'] = bs.u(2);
-  if (h['profile'] > 2) h['profile'] += bs.u(1);
-  h['show_existing_frames'] = bs.u(1);
-  if (h['show_existing_frames']) h['frame_to_show_map_idx'] = bs.u(3);
-  h['frame_type'] = bs.u(1);
-  h['show_frame'] = bs.u(1);
-  h['error_resilient_mode'] = bs.u(1);
-  h['current_frame_id'] = bs.u(15);
-  h['@addr'] = addr;
-  h['@type'] = h['frame_type'] == 0 ? 'I' : 'P';
-  h['@length'] = buffer.length;
-  h['@keyframe'] = 1 - h['frame_type'];
-  h['@frame_num'] = this.frame_num++;
-  store_header(h);
+  h['obu_forbidden_bit'] = bs.u(1);
+  h['obu_type'] = bs.u(4);
+  h['obu_extension_flag'] = bs.u(1);
+  h['obu_has_size_field'] = bs.u(1);
+  h['obu_reserved_1bit'] = bs.u(1);
+  if (h['obu_extension_flag']) {
+    h['temporal_id'] = bs.u(3);
+    h['spatial_id'] = bs.u(2);
+    h['extension_header_reserved_3bits'] = bs.u(3);
+  }
+  if (h['obu_has_size_field']) {
+    h['obu_size'] = bs.leb128();
+  }
+  return h;
+};
+
+    bitstream_parser_av1.prototype.sequence_header_obu = function(bs, h) {
+  h['seq_profile'] = bs.u(3);
+  h['still_picture'] = bs.u(1);
+  h['reduced_still_picture_header'] = bs.u(1);
+  if (h['reduced_still_picture_header']) {
+    h['timing_info_present_flag'] = 0;
+    h['decoder_model_info_present_flag'] = 0;
+    h['initial_display_delay_present_flag'] = 0;
+    h['operating_points_cnt_minus_1'] = 0;
+    h['operating_point_idc[0]'] = 0;
+    h['seq_level_idx[0]'] = bs.u(5);
+    h['seq_tier[0]'] = 0;
+    h['decoder_model_present_for_this_op[0]'] = 0;
+    h['initial_display_delay_present_for_this_op[0]'] = 0;
+  } else {
+    h['timing_info_present_flag'] = bs.u(1);
+    if (h['timing_info_present_flag']) {
+      h['num_units_in_display_tick'] = bs.u(32);
+      h['time_scale'] = bs.u(32);
+      h['equal_picture_interval'] = bs.u(1);
+      if (h['equal_picture_interval']) {
+        h['num_ticks_per_picture_minus_1'] = bs.uvlc();
+      }
+      h['decoder_model_info_present_flag'] = bs.u(1);
+      if (h['decoder_model_info_present_flag']) {
+        h['buffer_delay_length_minus_1'] = bs.u(5);
+        h['num_units_in_decoding_tick'] = bs.u(32);
+        h['buffer_removal_time_length_minus_1'] = bs.u(5);
+        h['frame_presentation_time_length_minus_1'] = bs.u(5);
+      }
+    } else {
+      h['decoder_model_info_present_flag'] = 0;
+    }
+    h['initial_display_delay_present_flag'] = bs.u(1);
+    h['operating_points_cnt_minus_1'] = bs.u(5);
+    for (var i = 0; i <= h['operating_points_cnt_minus_1']; i++) {
+      h['operating_point_idc[' + i + ']'] = bs.u(12);
+      h['seq_level_idx[' + i + ']'] = bs.u(5);
+      if (h['seq_level_idx[' + i + ']'] > 7) {
+        h['seq_tier[' + i + ']'] = bs.u(1);
+      } else {
+        h['seq_tier[' + i + ']'] = 0;
+      }
+      if (h['decoder_model_info_present_flag']) {
+        h['decoder_model_present_for_this_op[' + i + ']'] = bs.u(1);
+        if (h['decoder_model_present_for_this_op[' + i + ']']) {
+          var n = h['buffer_delay_length_minus_1'] + 1;
+          h['decoder_buffer_delay[' + i + ']'] = bs.u(n);
+          h['encoder_buffer_delay[' + i + ']'] = bs.u(n);
+          h['low_delay_mode_flag[' + i + ']'] = bs.u(1);
+        }
+      } else {
+        h['decoder_model_present_for_this_op[' + i + ']'] = 0;
+      }
+
+      if (h['initial_display_delay_present_flag']) {
+        h['initial_display_delay_present_for_this_op[' + i + ']'] = bs.u(1);
+        if (h['initial_display_delay_present_for_this_op[' + i + ']']) {
+          h['initial_display_delay_minus_1[' + i + ']'] = bs.u(4);
+        }
+      }
+    }
+  }
+  h['frame_width_bits_minus_1'] = bs.u(4);
+  h['frame_height_bits_minus_1'] = bs.u(4);
+  h['max_frame_width_minus_1'] = bs.u(h['frame_width_bits_minus_1'] + 1);
+  h['max_frame_height_minus_1'] = bs.u(h['frame_height_bits_minus_1'] + 1);
+  if (h['reduced_still_picture_header']) {
+    h['frame_id_numbers_present_flag'] = 0;
+  } else {
+    h['frame_id_numbers_present_flag'] = bs.u(1);
+  }
+  if (h['frame_id_numbers_present_flag']) {
+    h['delta_frame_id_length_minus_2'] = bs.u(4);
+    h['additional_frame_id_length_minus_1'] = bs.u(3);
+  }
+  h['use_128x128_superblock'] = bs.u(1);
+  h['enable_filter_intra'] = bs.u(1);
+  h['enable_intra_edge_filter'] = bs.u(1);
+  if (h['reduced_still_picture_header']) {
+    h['enable_interintra_compound'] = 0;
+    h['enable_masked_compound'] = 0;
+    h['enable_warped_motion'] = 0;
+    h['enable_dual_filter'] = 0;
+    h['enable_order_hint'] = 0;
+    h['enable_jnt_comp'] = 0;
+    h['enable_ref_frame_mvs'] = 0;
+    h['seq_force_screen_content_tools'] = this.SELECT_SCREEN_CONTENT_TOOLS;
+    h['seq_force_integer_mv'] = 1;
+    h['#OrderHintBits'] = 0;
+  } else {
+    h['enable_interintra_compound'] = bs.u(1);
+    h['enable_masked_compound'] = bs.u(1);
+    h['enable_warped_motion'] = bs.u(1);
+    h['enable_dual_filter'] = bs.u(1);
+    h['enable_order_hint'] = bs.u(1);
+    if (h['enable_order_hint']) {
+      h['enable_jnt_comp'] = bs.u(1);
+      h['enable_ref_frame_mvs'] = bs.u(1);
+    }
+    h['seq_choose_screen_content_tools'] = bs.u(1);
+    if (h['seq_choose_screen_content_tools']) {
+      h['seq_force_screen_content_tools'] = this.SELECT_SCREEN_CONTENT_TOOLS;
+    } else {
+      h['seq_force_screen_content_tools'] = bs.u(1);
+    }
+    if (h['seq_force_screen_content_tools'] > 0) {
+      h['seq_choose_integer_mv'] = bs.u(1);
+      if (h['seq_choose_integer_mv']) {
+        h['seq_force_integer_mv'] = 1;
+      } else {
+        h['seq_force_integer_mv'] = bs.u(1);
+      }
+    }
+    if (h['enable_order_hint']) {
+      h['order_hint_bits_minus_1'] = bs.u(3);
+      h['#OrderHintBits'] = h['order_hint_bits_minus_1'] + 1;
+    } else {
+      h['#OrderHintBits'] = 0;
+    }
+  }
+  h['enable_superres'] = bs.u(1);
+  h['enable_cdef'] = bs.u(1);
+  h['enable_restoration'] = bs.u(1);
+
+  this.color_config(bs, h);
+  h['film_grain_params_present'] = bs.u(1);
+  return h;
+};
+
+bitstream_parser_av1.prototype.color_config = function(bs, h) {
+  h['high_bitdepth'] = bs.u(1);
+  if (h['seq_profile'] == 2 && h['high_bitdepth']) {
+    h['twelve_bit'] = bs.u(1);
+  }
+  if (h['seq_profile'] == 1) {
+    h['mono_chrome'] = 0;
+  } else {
+    h['mono_chrome'] = bs.u(1);
+  }
+  h['color_description_present_flag'] = bs.u(1);
+  if (h['color_description_present_flag']) {
+    h['color_primaries'] = bs.u(8);
+    h['transfer_characteristics'] = bs.u(8);
+    h['matrix_coefficients'] = bs.u(8);
+  } else {
+    h['color_primaries'] = 2;
+    h['transfer_characteristics'] = 2;
+    h['matrix_coefficients'] = 2;
+  }
+  if (h['mono_chrome']) {
+    h['color_range'] = bs.u(1);
+    h['subsampling_x'] = 0;
+    h['subsampling_y'] = 0;
+    h['separate_uv_delta_q'] = 0;
+    return;
+  } else if (
+      h['color_primaries'] == 1 && h['transfer_characteristics'] == 13 &&
+      h['matrix_coefficients'] == 0) {
+    h['color_range'] = 1;
+    h['subsampling_x'] = 0;
+    h['subsampling_y'] = 0;
+  } else {
+    h['color_range'] = bs.u(1);
+    if (h['seq_profile'] == 0) {
+      h['subsampling_x'] = 1;
+      h['subsampling_y'] = 1;
+    } else if (h['seq_profile'] == 1) {
+      h['subsampling_x'] = 0;
+      h['subsampling_y'] = 0;
+    } else {
+      if ('twelve_bit' in h && h['twelve_bit']) {
+        h['subsampling_x'] = bs.u(1);
+        if (h['subsampling_x']) h['subsampling_y'] = bs.u(1);
+      } else {
+        h['subsampling_x'] = 1;
+        h['subsampling_y'] = 0;
+      }
+    }
+    if (h['subsampling_x'] && h['subsampling_y']) {
+      h['chroma_sample_position'] = bs.u(2);
+    }
+  }
+  h['separate_uv_delta_q'] = bs.u(1);
+};
+
+bitstream_parser_av1.prototype.frame_header_obu = function(bs, h) {
+  this.uncompressed_header(bs, h);
+};
+
+bitstream_parser_av1.prototype.frame_obu = function(bs, h) {
+  this.frame_header_obu(bs, h);
+};
+
+bitstream_parser_av1.prototype.uncompressed_header = function(bs, h) {
+  var idLen;
+  if (this.seq_header['frame_id_numbers_present_flag']) {
+    idLen =
+        this.seq_header['additional_frame_id_length_minus_1'] +
+         this.seq_header['delta_frame_id_length_minus_2'] + 3;
+  }
+  var allFrames = (1 << this.NUM_REF_FRAMES) - 1;
+  if (this.seq_header['reduced_still_picture_header']) {
+    h['show_existing_frame'] = 0;
+    h['frame_type'] = this.frame_type.KEY_FRAME;
+    h['#FrameIsIntra'] = 1;
+    h['show_frame'] = 1;
+    h['showable_frame'] = 0;
+  } else {
+    h['show_existing_frame'] = bs.u(1);
+    if (h['show_existing_frame'] == 1) {
+      h['frame_to_show_map_idx'] = bs.u(3);
+      if (this.seq_header['decoder_model_info_present_flag'] &&
+          !this.seq_header['equal_picture_interval']) {
+        var n = frame_presentation_time_length_minus_1 + 1;
+        h['frame_presentation_time'] = bs.u(n);
+      }
+      h['refresh_frame_flags'] = 0;
+      if (this.seq_header['frame_id_numbers_present_flag']) {
+        h['display_frame_id'] = bs.u(idLen);
+      }
+      var ref_frame =
+          this.find_ref(h['frame_to_show_map_idx[' + ref_idx + ']']);
+      h['frame_type'] = ref_frame['frame_type'];
+      if (h['frame_type'] == this.frame_type.KEY_FRAME) {
+        h['refresh_frame_flags'] = allFrames;
+      }
+      return;
+    }
+    h['frame_type'] = bs.u(2);
+    h['#FrameIsIntra'] =
+        (h['frame_type'] == this.frame_type.INTRA_ONLY_FRAME ||
+         h['frame_type'] == this.frame_type.KEY_FRAME)
+    h['show_frame'] = bs.u(1);
+    if (h['show_frame'] && this.seq_header['decoder_model_info_present_flag'] &&
+        !equal_picture_interval) {
+      var n = this.seq_header['frame_presentation_time_length_minus_1'] + 1;
+      h['frame_presentation_time'] = bs.u(n);
+    }
+    if (h['show_frame']) {
+      h['showable_frame'] = h['frame_type'] != this.frame_type.KEY_FRAME;
+    } else {
+      h['showable_frame'] = bs.u(1);
+    }
+    if (h['frame_type'] == this.frame_type.SWITCH_FRAME ||
+        (h['frame_type'] == this.frame_type.KEY_FRAME && h['show_frame']))
+      h['error_resilient_mode'] = 1;
+    else
+      h['error_resilient_mode'] = bs.u(1);
+  }
+
+  h['disable_cdf_update'] = bs.u(1);
+  if (this.seq_header['seq_force_screen_content_tools'] ==
+      this.SELECT_SCREEN_CONTENT_TOOLS) {
+    h['allow_screen_content_tools'] = bs.u(1);
+  } else {
+    h['allow_screen_content_tools'] =
+        this.seq_header['seq_force_screen_content_tools'];
+  }
+  if (this.seq_header['allow_screen_content_tools']) {
+    if (this.seq_header['seq_force_integer_mv'] == this.SELECT_INTEGER_MV) {
+      h['force_integer_mv'] = bs.u(1);
+    } else {
+      h['force_integer_mv'] = this.seq_header['seq_force_integer_mv'];
+    }
+  } else {
+    h['force_integer_mv'] = 0;
+  }
+  if (h['#FrameIsIntra']) {
+    h['force_integer_mv'] = 1;
+  }
+  if (this.seq_header['frame_id_numbers_present_flag']) {
+    h['current_frame_id'] = bs.u(idLen);
+  } else {
+    h['current_frame_id'] = 0;
+  }
+  if (h['frame_type'] == this.frame_type.SWITCH_FRAME)
+    h['frame_size_override_flag'] = 1;
+  else if (this.seq_header['reduced_still_picture_header'])
+    h['frame_size_override_flag'] = 0;
+  else
+    h['frame_size_override_flag'] = bs.u(1);
+  h['order_hint'] = bs.u(this.seq_header['#OrderHintBits']);
+  if (h['#FrameIsIntra'] || this.seq_header['error_resilient_mode']) {
+    h['primary_ref_frame'] = this.PRIMARY_REF_NONE;
+  } else {
+    h['primary_ref_frame'] = bs.u(3);
+  }
+  if (this.seq_header['decoder_model_info_present_flag']) {
+    h['buffer_removal_time_present_flag'] = bs.u(1);
+    if (h['buffer_removal_time_present_flag']) {
+      for (var i = 0; i <= this.seq_header['operating_points_cnt_minus_1'];
+           i++) {
+        if (this.seq_header['decoder_model_present_for_this_op[' + i + ']']) {
+          var opPtIdc = this.seq_header['operating_point_idc[' + i + ' ]'];
+          var inTemporalLayer = (opPtIdc >> h['temporal_id']) & 1;
+          var inSpatialLayer = (opPtIdc >> (h['spatial_id'] + 8)) & 1;
+          if (opPtIdc == 0 || (inTemporalLayer && inSpatialLayer)) {
+            var n = this.seq_header['buffer_removal_time_length_minus_1'] + 1;
+            h['buffer_removal_time[' + i + ']'] = bs.u(n);
+          }
+        }
+      }
+    }
+  }
+  h['allow_high_precision_mv'] = 0;
+  h['use_ref_frame_mvs'] = 0;
+  h['allow_intrabc'] = 0;
+  if (h['frame_type'] == this.frame_type.SWITCH_FRAME ||
+      (h['frame_type'] == this.frame_type.KEY_FRAME && h['show_frame'])) {
+    h['refresh_frame_flags'] = allFrames;
+  } else {
+    h['refresh_frame_flags'] = bs.u(8);
+  }
+  if (!h['#FrameIsIntra'] || h['refresh_frame_flags'] != allFrames) {
+    if (this.seq_header['error_resilient_mode'] &&
+        this.seq_header['enable_order_hint']) {
+      for (var i = 0; i < this.NUM_REF_FRAMES; i++) {
+        h['ref_order_hint[' + i + ']'] =
+            bs.u(this.seq_header['#OrderHintBits']);
+      }
+    }
+  }
+
+  if (h['frame_type'] == this.frame_type.KEY_FRAME ||
+      h['frame_type'] == this.frame_type.INTRA_ONLY_FRAME) {
+    this.frame_size(bs, h);
+    this.render_size(bs, h);
+    if (this.seq_header['allow_screen_content_tools'] &&
+        h['#UpscaledWidth'] == h['#FrameWidth']) {
+      h['allow_intrabc'] = bs.u(1);
+    }
+  } else {
+    if (!h['enable_order_hint']) {
+      h['frame_refs_short_signaling'] = 0;
+    } else {
+      h['frame_refs_short_signaling'] = bs.u(1);
+      if (h['frame_refs_short_signaling']) {
+        h['last_frame_idx'] = bs.u(3);
+        h['gold_frame_idx'] = bs.u(3);
+      }
+    }
+    for (i = 0; i < this.REFS_PER_FRAME; i++) {
+      if (!h['frame_refs_short_signaling'])
+        h['ref_frame_idx[' + i + ']'] = bs.u(3);
+      if (this.seq_header['frame_id_numbers_present_flag']) {
+        var n = this.seq_header['delta_frame_id_length_minus_2'] + 2;
+        h['delta_frame_id_minus_1'] = bs.u(n);
+      }
+    }
+
+    if (this.seq_header['frame_size_override_flag'] &&
+        !this.seq_header['error_resilient_mode']) {
+      for (var i = 0; i < this.REFS_PER_FRAME; i++) {
+        h['found_ref[' + i + ']'] = bs.u(1);
+        if (h['found_ref[' + i + ']']) {
+          var find_ref = this.find_ref(h['ref_frame_idx[' + i + ']']);
+          h['#UpscaledWidth'] = find_ref['#UpscaledWidth'];
+          h['#FrameWidth'] = h['#UpscaledWidth'];
+          h['#FrameHeight'] = find_ref['#FrameHeight'];
+          h['#RenderWidth'] = find_ref['#RenderWidth'];
+          h['#RenderHeight'] = find_ref['#RenderHeight'];
+          this.superres_params(bs, h);
+          break;
+        }
+      }
+    }
+    if (!('#FrameWidth' in h)) {
+      this.frame_size(bs, h);
+      this.render_size(bs, h);
+    }
+
+    if (h['force_integer_mv']) {
+      h['allow_high_precision_mv'] = 0;
+    } else {
+      h['allow_high_precision_mv'] = bs.u(1);
+    }
+    h['is_filter_switchable'] = bs.u(1);
+    if (h['is_filter_switchable'] == 1) {
+      h['interpolation_filter'] = 4;
+    } else {
+      h['interpolation_filter'] = bs.u(2);
+    }
+    h['is_motion_mode_switchable'] = bs.u(1);
+    if (this.seq_header['error_resilient_mode'] ||
+        !this.seq_header['enable_ref_frame_mvs']) {
+      h['use_ref_frame_mvs'] = 0;
+    } else {
+      h['use_ref_frame_mvs'] = bs.u(1);
+    }
+  }
+
+  if (this.seq_header['reduced_still_picture_header'] ||
+      h['disable_cdf_update'])
+    h['disable_frame_end_update_cdf'] = 1;
+  else
+    h['disable_frame_end_update_cdf'] = bs.u(1);
+
+  if (h['primary_ref_frame'] == this.PRIMARY_REF_NONE) {
+    this.setup_past_independence(h);
+  } else {
+    this.load_previous(h);
+  }
+
+  this.tile_info(bs, h);
+  this.quantization_params(bs, h);
+  this.segmentation_params(bs, h);
+  this.delta_q_params(bs, h);
+  this.delta_lf_params(bs, h);
+  h['#CodedLossless'] = 1;
+  for (var sid = 0; sid < this.MAX_SEGMENTS; sid++) {
+    h['qindex[' + sid + ']'] = this.get_qindex(h, 1, sid);
+    h['#LosslessArray[' + sid + ']'] = h['qindex[' + sid + ']'] == 0 &&
+        h['#DeltaQYDc'] == 0 && h['#DeltaQUAc'] == 0 && h['#DeltaQUDc'] == 0 &&
+        h['#DeltaQVAc'] == 0 && h['#DeltaQVDc'] == 0
+    if (!h['#LosslessArray[' + sid + ']']) {
+      h['#CodedLossless'] = 0;
+    }
+  }
+  h['#AllLossless'] =
+      h['#CodedLossless'] && (h['#FrameWidth'] == h['#UpscaledWidth']);
+  this.loop_filter_params(bs, h);
+  this.cdef_params(bs, h);
+  this.lr_params(bs, h);
+
+  h['tx_mode_select'] = h['#CodedLossless'] ? 0 : bs.u(1);
+  h['reference_select'] = h['#FrameIsIntra'] ? 0 : bs.u(1);
+
+  this.skip_mode_params(bs, h);
+  if (h['#FrameIsIntra'] || this.seq_header['error_resilient_mode'] ||
+      !this.seq_header['enable_warped_motion'])
+    h['allow_warped_motion'] = 0;
+  else
+    h['allow_warped_motion'] = bs.u(1);
+  h['reduced_tx_set'] = bs.u(1);
+  this.global_motion_params(bs, h);
+  this.film_grain_params(bs, h);
+};
+
+bitstream_parser_av1.prototype.frame_size = function(bs, h) {
+  if (h['frame_size_override_flag']) {
+    var n = frame_width_bits_minus_1 + 1;
+    h['frame_width_minus_1'] = bs.u(n);
+    n = frame_height_bits_minus_1 + 1;
+    h['frame_height_minus_1'] = bs.u(n);
+    h['#FrameWidth'] = h['frame_width_minus_1'] + 1;
+    h['#FrameHeight'] = h['frame_height_minus_1'] + 1;
+  } else {
+    h['#FrameWidth'] = this.seq_header['max_frame_width_minus_1'] + 1;
+    h['#FrameHeight'] = this.seq_header['max_frame_height_minus_1'] + 1;
+  }
+  this.superres_params(bs, h);
+};
+
+bitstream_parser_av1.prototype.superres_params = function(bs, h) {
+  if (this.seq_header['enable_superres'])
+    h['use_superres'] = bs.u(1);
+  else
+    h['use_superres'] = 0;
+  if (h['use_superres']) {
+    h['coded_denom'] = bs.u(3);
+    h['#SuperresDenom'] = h['coded_denom'] + 9;
+  } else {
+    h['#SuperresDenom'] = 8;
+  }
+  h['#UpscaledWidth'] = h['#FrameWidth'];
+  h['#FrameWidth'] = ((h['#UpscaledWidth'] * 8 + (h['#SuperresDenom'] >> 1)) /
+                      h['#SuperresDenom']) >>>
+      0;
+};
+
+bitstream_parser_av1.prototype.render_size = function(bs, h) {
+  h['render_and_frame_size_different'] = bs.u(1);
+  if (h['render_and_frame_size_different'] == 1) {
+    h['render_width_minus_1'] = bs.u(16);
+    h['render_height_minus_1'] = bs.u(16);
+    h['#RenderWidth'] = h['render_width_minus_1'] + 1;
+    h['#RenderHeight'] = h['render_height_minus_1'] + 1;
+  } else {
+    h['#RenderWidth'] = h['#UpscaledWidth'];
+    h['#RenderHeight'] = h['#FrameHeight'];
+  }
+};
+
+bitstream_parser_av1.prototype.get_relative_dist = function(a, b) {
+  if (!this.seq_header['enable_order_hint']) return 0;
+  var diff = a - b;
+  var m = 1 << (this.seq_header['#OrderHintBits'] - 1);
+  diff = (diff & (m - 1)) - (diff & m);
+  return diff;
+};
+
+bitstream_parser_av1.prototype.setup_past_independence = function(h) {
+  for (var ref = this.ref_frame_type.LAST_FRAME;
+       ref <= this.ref_frame_type.ALTREF_FRAME; ++ref) {
+    for (var i = 0; i <= 5; ++i) {
+      h['#PrevGmParams[' + ref + '][' + i + ']'] = (i % 3) == 2 ? 1 << 16 : 8;
+    }
+  }
+};
+
+bitstream_parser_av1.prototype.load_previous = function(h) {
+  var ref_frame =
+      this.find_ref(h['ref_frame_idx[' + h['primary_ref_frame'] + ']']);
+  for (var ref = this.ref_frame_type.LAST_FRAME;
+       ref <= this.ref_frame_type.ALTREF_FRAME; ++ref) {
+    for (var i = 0; i <= 5; ++i) {
+      h['#PrevGmParams[' + ref + '][' + i + ']'] =
+          ref_frame['#gm_params[' + ref + '][' + i + ']'];
+    }
+  }
+};
+
+bitstream_parser_av1.prototype.tile_info = function(bs, h) {
+  var MiCols = 2 * ((h['#FrameWidth'] + 7) >> 3);
+  var MiRows = 2 * ((h['#FrameHeight'] + 7) >> 3);
+  var sbCols = this.seq_header['use_128x128_superblock'] ?
+      ((MiCols + 31) >> 5) :
+      ((MiCols + 15) >> 4);
+  var sbRows = this.seq_header['use_128x128_superblock'] ?
+      ((MiRows + 31) >> 5) :
+      ((MiRows + 15) >> 4);
+  var sbShift = this.seq_header['use_128x128_superblock'] ? 5 : 4
+  var sbSize = sbShift + 2;
+  var maxTileWidthSb = 4096 >> sbSize;
+  var maxTileAreaSb = (4096 * 2304) >> (2 * sbSize);
+  var minLog2TileCols = this.tile_log2(maxTileWidthSb, sbCols);
+  var maxLog2TileCols = this.tile_log2(1, Math.min(sbCols, 64));
+  var maxLog2TileRows = this.tile_log2(1, Math.min(sbRows, 64));
+  var minLog2Tiles =
+      Math.max(minLog2TileCols, this.tile_log2(maxTileAreaSb, sbRows * sbCols))
+
+  h['uniform_tile_spacing_flag'] = bs.u(1);
+  if (h['uniform_tile_spacing_flag']) {
+    h['tile_cols_log2'] = minLog2TileCols;
+    while (h['tile_cols_log2'] < maxLog2TileCols) {
+      if (!bs.u(1)) break;
+      h['tile_cols_log2']++;
+    }
+
+    h['tile_rows_log2'] = Math.max(minLog2Tiles - h['tile_cols_log2'], 0);
+    while (h['tile_rows_log2'] < maxLog2TileRows) {
+      if (!bs.u(1)) break;
+      h['tile_rows_log2']++;
+    }
+  } else {
+    var widestTileSb = 0;
+    var startSb = 0;
+    var i;
+    for (i = 0; startSb < sbCols; i++) {
+      var maxWidth = Math.min(sbCols - startSb, maxTileWidthSb);
+      h['width_in_sbs_minus_1'] = bs.ns(maxWidth);
+      var sizeSb = h['width_in_sbs_minus_1'] + 1;
+      widestTileSb = Math.max(sizeSb, widestTileSb);
+      startSb += sizeSb;
+    }
+    h['tile_cols_log2'] = this.tile_log2(1, i);
+
+    var maxTileAreaSb;
+    if (minLog2Tiles > 0)
+      maxTileAreaSb = (sbRows * sbCols) >> (minLog2Tiles + 1);
+    else
+      maxTileAreaSb = sbRows * sbCols;
+    var maxTileHeightSb = Math.max((maxTileAreaSb / widestTileSb) >>> 0, 1);
+
+    var startSb = 0;
+    var i;
+    for (i = 0; startSb < sbRows; i++) {
+      var maxHeight = Math.min(sbRows - startSb, maxTileHeightSb);
+      h['height_in_sbs_minus_1'] = bs.ns(maxHeight);
+      startSb += h['height_in_sbs_minus_1'] + 1;
+    }
+    h['tile_rows_log2'] = this.tile_log2(1, i);
+  }
+  if (h['tile_cols_log2'] > 0 || h['tile_rows_log2'] > 0) {
+    h['context_update_tile_id'] = bs.u(h['tile_rows_log2'] + h['tile_cols_log2']);
+    h['tile_size_bytes_minus_1'] = bs.u(2);
+  } else {
+    h['context_update_tile_id'] = 0;
+  }
+};
+
+bitstream_parser_av1.prototype.tile_log2 = function(blkSize, target) {
+  var k = 0;
+  while ((blkSize << k) < target) k++;
+  return k;
+};
+
+bitstream_parser_av1.prototype.quantization_params = function(bs, h) {
+  h['base_q_idx'] = bs.u(8);
+  h['#DeltaQYDc'] = this.read_delta_q(bs, h);
+  if (!this.seq_header['mono_chrome']) {
+    if (this.seq_header['separate_uv_delta_q'])
+      h['diff_uv_delta'] = bs.u(1);
+    else
+      h['diff_uv_delta'] = 0;
+    h['#DeltaQUDc'] = this.read_delta_q(bs, h);
+    h['#DeltaQUAc'] = this.read_delta_q(bs, h);
+    if (h['diff_uv_delta']) {
+      h['#DeltaQVAc'] = this.read_delta_q(bs, h);
+      h['#DeltaQVDc'] = this.read_delta_q(bs, h);
+    } else {
+      h['#DeltaQVAa'] = h['#DeltaQUDc'];
+      h['#DeltaQVAc'] = h['#DeltaQUAc'];
+    }
+  } else {
+    h['#DeltaQUDc'] = 0;
+    h['#DeltaQUAc'] = 0;
+    h['#DeltaQVDc'] = 0;
+    h['#DeltaQVAc'] = 0;
+  }
+  h['using_qmatrix'] = bs.u(1);
+  if (h['using_qmatrix']) {
+    h['qm_y'] = bs.u(4);
+    h['qm_u'] = bs.u(4);
+    if (!this.seq_header['separate_uv_delta_q'])
+      h['qm_v'] = h['qm_u'];
+    else
+      h['qm_v'] = bs.u(4);
+  }
+};
+
+bitstream_parser_av1.prototype.read_delta_q = function(bs, h) {
+  var delta_q = 0;
+  var delta_coded = bs.u(1);
+  if (delta_coded) delta_q = bs.su(1 + 6);
+  return delta_q;
+};
+
+bitstream_parser_av1.prototype.segmentation_params = function(bs, h) {
+  var Segmentation_Feature_Bits = [8, 6, 6, 6, 6, 3, 0, 0];
+  var Segmentation_Feature_Signed = [1, 1, 1, 1, 1, 0, 0, 0];
+  var Segmentation_Feature_Max = [255, 63, 63, 63, 63, 7, 0, 0];
+
+  h['segmentation_enabled'] = bs.u(1);
+  if (h['segmentation_enabled'] == 1) {
+    if (h['primary_ref_frame'] == this.PRIMARY_REF_NONE) {
+      h['segmentation_update_map'] = 1;
+      h['segmentation_temporal_update'] = 0;
+      h['segmentation_update_data'] = 1;
+    } else {
+      h['segmentation_update_map'] = bs.u(1);
+      if (h['segmentation_update_map'] == 1)
+        h['segmentation_temporal_update'] = bs.u(1);
+      h['segmentation_update_data'] = bs.u(1);
+    }
+    if (h['segmentation_update_data'] == 1) {
+      for (i = 0; i < 8; i++) {
+        for (j = 0; j < 8; j++) {
+          var enabled = h['feature_enabled[' + i + '][' + j + ']'] = bs.u(1);
+          this.FeatureEnabled[i][j] = enabled;
+          if (enabled) {
+            var bitsToRead = Segmentation_Feature_Bits[j];
+            var limit = Segmentation_Feature_Max[j];
+            var clippedValue = 0;
+            if (Segmentation_Feature_Signed[j] == 1) {
+              h['feature_value[' + i + '][' + j + ']'] = bs.su(1 + bitsToRead);
+              clippedValue =
+                  clip(h['feature_value[' + i + '][' + j + ']'], -limit, limit);
+            } else {
+              h['feature_value[' + i + '][' + j + ']'] = bs.u(bitsToRead);
+              clippedValue = clip(
+                  h['feature_value[' + i + '][' + j + ']'], 0,
+                  h['feature_value[' + i + '][' + j + ']']);
+            }
+            this.FeatureData[i][j] = clippedValue;
+          }
+        }
+      }
+    }
+  } else {
+    this.FeatureEnabled.fill(0);
+    this.FeatureData.fill(0);
+  }
+};
+
+bitstream_parser_av1.prototype.delta_q_params = function(bs, h) {
+  h['delta_q_res'] = 0;
+  h['delta_q_present'] = 0;
+  if (h['base_q_idx'] > 0) {
+    h['delta_q_present'] = bs.u(1);
+  }
+  if (h['delta_q_present']) {
+    h['delta_q_res'] = bs.u(2);
+  }
+};
+
+bitstream_parser_av1.prototype.delta_lf_params = function(bs, h) {
+  h['delta_lf_present'] = 0
+  h['delta_lf_res'] = 0
+  h['delta_lf_multi'] = 0
+  if (h['delta_q_present']) {
+    if (!h['allow_intrabc']) {
+      h['delta_lf_present'] = bs.u(1);
+    }
+    if (h['delta_lf_present']) {
+      h['delta_lf_res'] = bs.u(2);
+      h['delta_lf_multi'] = bs.u(1);
+    }
+  }
+};
+
+bitstream_parser_av1.prototype.get_qindex = function(
+    h, ignoreDeltaQ, segmentId) {
+  var qindex = h['base_q_idx'];
+  if (h['segmentation_enabled'] && this.FeatureEnabled[segmentId][0])
+    qindex += this.FeatureData[segmentId][0];
+  return clip(qindex, 0, 255);
+};
+
+bitstream_parser_av1.prototype.loop_filter_params = function(bs, h) {
+  if (h['#CodedLossless'] || h['allow_intrabc']) {
+    return;
+  }
+  h['loop_filter_level[0]'] = bs.u(6);
+  h['loop_filter_level[1]'] = bs.u(6);
+  if (!this.seq_header['mono_chrome']) {
+    if (h['loop_filter_level[0]'] || h['loop_filter_level[1]']) {
+      h['loop_filter_level[2]'] = bs.u(6);
+      h['loop_filter_level[3]'] = bs.u(6);
+    }
+  }
+  h['loop_filter_sharpness'] = bs.u(3);
+  h['loop_filter_delta_enabled'] = bs.u(1);
+  if (h['loop_filter_delta_enabled']) {
+    h['loop_filter_delta_update'] = bs.u(1);
+    if (h['loop_filter_delta_update']) {
+      for (var i = 0; i < 8; i++) {
+        h['update_ref_delta'] = bs.u(1);
+        if (h['update_ref_delta']) {
+          h['loop_filter_ref_deltas[' + i + ']'] = bs.su(1 + 6);
+        }
+      }
+      for (var i = 0; i < 2; i++) {
+        h['update_mode_delta'] = bs.u(1);
+        if (h['update_mode_delta']) {
+          h['loop_filter_mode_deltas[' + i + ']'] = bs.su(1 + 6);
+        }
+      }
+    }
+  }
+};
+
+bitstream_parser_av1.prototype.cdef_params = function(bs, h) {
+  if (h['#CodedLossless'] || h['allow_intrabc'] ||
+      !this.seq_header['enable_cdef']) {
+    return;
+  }
+  h['cdef_damping_minus_3'] = bs.u(2);
+  h['cdef_bits'] = bs.u(2);
+  for (var i = 0; i < (1 << h['cdef_bits']); i++) {
+    h['cdef_y_pri_strength[' + i + ']'] = bs.u(4);
+    h['cdef_y_sec_strength[' + i + ']'] = bs.u(2);
+    if (h['cdef_y_sec_strength[' + i + ']'] == 3) {
+      h['cdef_y_sec_strength[' + i + ']'] += 1;
+    }
+    if (!this.seq_header['mono_chrome']) {
+      h['cdef_uv_pri_strength[' + i + ']'] = bs.u(4);
+      h['cdef_uv_sec_strength[' + i + ']'] = bs.u(2);
+      if (h['cdef_uv_sec_strength[' + i + ']'] == 3) {
+        h['cdef_uv_sec_strength[' + i + ']'] += 1;
+      }
+    }
+  }
+};
+
+bitstream_parser_av1.prototype.lr_params = function(bs, h) {
+  if (h['#AllLossless'] || h['allow_intrabc'] ||
+      !this.seq_header['enable_restoration']) {
+    return;
+  }
+  var UsesLr = 0;
+  var usesChromaLr = 0;
+  var NumPlanes = this.seq_header['mono_chrome'] ? 1 : 3;
+  for (var i = 0; i < NumPlanes; i++) {
+    h['lr_type['+i+']'] = bs.u(2);
+  }
+  if (h['lr_type[0]']) {
+    if (this.seq_header['use_128x128_superblock']) {
+      h['lr_unit_shift'] = bs.u(1);
+    } else {
+      h['lr_unit_shift'] = bs.u(1);
+      if (h['lr_unit_shift']) {
+        h['lr_unit_extra_shift'] = bs.u(1);
+      }
+    }
+    if (this.seq_header['subsampling_x'] && this.seq_header['subsampling_y'] &&
+        usesChromaLr) {
+      h['lr_uv_shift'] = bs.u(1);
+    }
+  }
+};
+
+bitstream_parser_av1.prototype.skip_mode_params = function(bs, h) {
+  var skipModeAllowed;
+  if (h['#FrameIsIntra'] || !h['reference_select'] || !h['enable_order_hint']) {
+    skipModeAllowed = 0;
+  } else {
+    var forwardIdx = -1;
+    var backwardIdx = -1;
+    var forwardHint = -1;
+    var backwardHint = Math.pow(2, 32) - 1;
+    for (var i = 0; i < this.NUM_REF_FRAMES; i++) {
+      var ref_frame = this.find_ref(h['ref_frame_idx[' + i + ']']);
+      var refHint = ref_frame['order_hint'];
+      if (this.get_relative_dist(refHint, h['order_hint']) < 0) {
+        if (forwardIdx < 0 ||
+            this.get_relative_dist(refHint, forwardHint) > 0) {
+          forwardIdx = i;
+          forwardHint = refHint;
+        }
+      } else if (this.get_relative_dist(refHint, h['order_hint']) > 0) {
+        if (backwardIdx < 0 ||
+            this.get_relative_dist(refHint, backwardHint) < 0) {
+          backwardIdx = i;
+          backwardHint = refHint;
+        }
+      }
+    }
+    if (forwardIdx < 0) {
+      skipModeAllowed = 0;
+    } else if (backwardIdx >= 0) {
+      skipModeAllowed = 1;
+    } else {
+      var secondForwardIdx = -1;
+      var secondForwardHint = -1;
+      for (var i = 0; i < this.NUM_REF_FRAMES; i++) {
+        var ref_frame = this.find_ref(h['ref_frame_idx[' + i + ']']);
+        var refHint = ref_frame['order_hint'];
+        if (this.get_relative_dist(refHint, forwardHint) < 0) {
+          if (secondForwardIdx < 0 ||
+              this.get_relative_dist(refHint, secondForwardHint) > 0) {
+            secondForwardIdx = i;
+            secondForwardHint = refHint;
+          }
+        }
+      }
+      if (secondForwardIdx < 0) {
+        skipModeAllowed = 0;
+      } else {
+        skipModeAllowed = 1;
+      }
+    }
+  }
+  if (skipModeAllowed) {
+    h['skip_mode_present'] = bs.u(1);
+  } else {
+    h['skip_mode_present'] = 0;
+  }
+};
+
+bitstream_parser_av1.prototype.global_motion_params = function(bs, h) {
+  for (var ref = this.ref_frame_type.LAST_FRAME;
+       ref <= this.ref_frame_type.ALTREF_FRAME; ref++) {
+    for (i = 0; i < 6; i++) {
+      h['#gm_params[' + ref + '][' + i + ']'] = ((i % 3 == 2) ? 1 << 16 : 0);
+    }
+  }
+  if (h['#FrameIsIntra']) {
+    return;
+  }
+  for (var ref = this.ref_frame_type.LAST_FRAME;
+       ref <= this.ref_frame_type.ALTREF_FRAME; ref++) {
+    h['is_global[' + ref + ']'] = bs.u(1);
+    var type;
+    if (h['is_global[' + ref + ']']) {
+      h['is_rot_zoom[' + ref + ']'] = bs.u(1);
+      if (h['is_rot_zoom[' + ref + ']']) {
+        type = this.ROTZOOM;
+      } else {
+        h['is_translation[' + ref + ']'] = bs.u(1);
+        type =
+            h['is_translation[' + ref + ']'] ? this.TRANSLATION : this.AFFINE;
+      }
+    } else {
+      type = this.IDENTITY;
+    }
+    if (type >= this.ROTZOOM) {
+      this.read_global_param(bs, h, type, ref, 2);
+      this.read_global_param(bs, h, type, ref, 3);
+      if (type == this.AFFINE) {
+        this.read_global_param(bs, h, type, ref, 4);
+        this.read_global_param(bs, h, type, ref, 5);
+      } else {
+        h['#gm_params[' + ref + '][4]'] = -h['#gm_params[' + ref + '][3]'];
+        h['#gm_params[' + ref + '][5]'] = h['#gm_params[' + ref + '][2]'];
+      }
+    }
+    if (type >= this.TRANSLATION) {
+      this.read_global_param(bs, h, type, ref, 0);
+      this.read_global_param(bs, h, type, ref, 1);
+    }
+  }
+};
+
+bitstream_parser_av1.prototype.read_global_param = function(
+    bs, h, type, ref, idx) {
+  const GM_ABS_ALPHA_BITS = 12;
+  const GM_ALPHA_PREC_BITS = 15;
+  const GM_ABS_TRANS_ONLY_BITS = 9;
+  const GM_ABS_TRANS_BITS = 12;
+  const GM_TRANS_PREC_BITS = 6;
+  const GM_TRANS_ONLY_PREC_BITS = 3;
+  var absBits = GM_ABS_ALPHA_BITS;
+  var precBits = GM_ALPHA_PREC_BITS;
+  if (idx < 2) {
+    if (type == this.TRANSLATION) {
+      absBits = GM_ABS_TRANS_ONLY_BITS - !h['allow_high_precision_mv'];
+      precBits = GM_TRANS_ONLY_PREC_BITS - !h['allow_high_precision_mv'];
+    } else {
+      absBits = GM_ABS_TRANS_BITS;
+      precBits = GM_TRANS_PREC_BITS;
+    }
+  }
+  var precDiff = 16 - precBits;
+  var round = (idx % 3) == 2 ? (1 << 16) : 0;
+  var sub = (idx % 3) == 2 ? (1 << precBits) : 0;
+  var mx = (1 << absBits);
+  var r = (h['#PrevGmParams[' + ref + '][' + idx + ']'] >> precDiff) - sub;
+  h['#gm_params[' + ref + '][' + idx + ']'] =
+      (this.decode_signed_subexp_with_ref(bs, h, -mx, mx + 1, r) << precDiff) +
+      round;
+};
+
+bitstream_parser_av1.prototype.decode_signed_subexp_with_ref = function(
+    bs, h, low, high, r) {
+  var x = this.decode_unsigned_subexp_with_ref(bs, h, high - low, r - low);
+  return x + low;
+};
+
+bitstream_parser_av1.prototype.decode_unsigned_subexp_with_ref = function(
+    bs, h, mx, r) {
+  v = this.decode_subexp(bs, h, mx);
+  if ((r << 1) <= mx) {
+    return this.inverse_recenter(r, v);
+  } else {
+    return mx - 1 - this.inverse_recenter(mx - 1 - r, v);
+  }
+};
+
+bitstream_parser_av1.prototype.decode_subexp = function(bs, h, numSyms) {
+  var i = 0;
+  var mk = 0;
+  var k = 3;
+  var n = 0;
+  while (1) {
+    var b2 = i ? k + i - 1 : k;
+    var a = 1 << b2;
+    if (numSyms <= mk + 3 * a) {
+      h['subexp_final_bits[' + n + ']'] = bs.ns(numSyms - mk);
+      return subexp_final_bits + mk;
+    } else {
+      h['subexp_more_bits[' + n + ']'] = bs.u(1);
+      if (h['subexp_more_bits[' + n + ']']) {
+        i++;
+        mk += a;
+      } else {
+        h['subexp_bits[' + n + ']'] = bs.u(b2);
+        return h['subexp_bits[' + n + ']'] + mk;
+      }
+    }
+    ++n;
+  }
+};
+
+bitstream_parser_av1.prototype.inverse_recenter = function(r, v) {
+  if (v > 2 * r)
+    return v;
+  else if (v & 1)
+    return r - ((v + 1) >> 1);
+  else
+    return r + (v >> 1);
+};
+
+bitstream_parser_av1.prototype.film_grain_params = function(bs, h) {
+  if (!this.seq_header['film_grain_params_present'] ||
+      (!h['show_frame'] && !h['showable_frame'])) {
+    return;
+  }
+  h['apply_grain'] = bs.u(1);
+  if (!h['apply_grain']) {
+    return;
+  }
+  h['grain_seed'] = bs.u(16);
+  if (h['frame_type'] == this.frame_type.INTER_FRAME)
+    h['update_grain'] = bs.u(1);
+  else
+    h['update_grain'] = 1;
+  if (!h['update_grain']) {
+    h['film_grain_params_ref_idx'] = bs.u(3);
+    return;
+  }
+  h['num_y_points'] = bs.u(4);
+  for (i = 0; i < num_y_points; i++) {
+    h['point_y_value[ i ]'] = bs.u(8);
+    h['point_y_scaling[ i ]'] = bs.u(8);
+  }
+  if (this.seq_header['mono_chrome']) {
+    h['chroma_scaling_from_luma'] = 0;
+  } else {
+    h['chroma_scaling_from_luma'] = bs.u(1);
+  }
+  if (this.seq_header['mono_chrome'] ||
+      this.seq_header['chroma_scaling_from_luma'] ||
+      (this.seq_header['subsampling_x'] == 1 &&
+       this.seq_header['subsampling_y'] == 1 && h['num_y_points'] == 0)) {
+    h['num_cb_points'] = 0;
+    h['num_cr_points'] = 0;
+  } else {
+    h['num_cb_points'] = bs.u(4);
+    for (var i = 0; i < num_cb_points; i++) {
+      h['point_cb_value[ i ]'] = bs.u(8);
+      h['point_cb_scaling[ i ]'] = bs.u(8);
+    }
+    h['num_cr_points'] = bs.u(4);
+    for (var i = 0; i < num_cr_points; i++) {
+      h['point_cr_value[ i ]'] = bs.u(8);
+      h['point_cr_scaling[ i ]'] = bs.u(8);
+    }
+  }
+  h['grain_scaling_minus_8'] = bs.u(2);
+  h['ar_coeff_lag'] = bs.u(2);
+  var numPosLuma = 2 * h['ar_coeff_lag'] * (h['ar_coeff_lag'] + 1);
+  var numPosChroma = numPosLuma;
+  if (h['num_y_points']) {
+    numPosChroma = numPosLuma + 1;
+    for (var i = 0; i < numPosLuma; i++)
+      h['ar_coeffs_y_plus_128[' + i + ']'] = bs.u(8);
+  }
+  if (h['chroma_scaling_from_luma'] || h['num_cb_points']) {
+    for (var i = 0; i < numPosChroma; i++)
+      h['ar_coeffs_cb_plus_128[' + i + ']'] = bs.u(8);
+  }
+  if (h['chroma_scaling_from_luma'] || h['num_cr_points']) {
+    for (var i = 0; i < numPosChroma; i++)
+      h['ar_coeffs_cr_plus_128[' + i + ']'] = bs.u(8);
+  }
+  h['ar_coeff_shift_minus_6'] = bs.u(2);
+  h['grain_scale_shift'] = bs.u(2);
+  if (h['num_cb_points']) {
+    h['cb_mult'] = bs.u(8);
+    h['cb_luma_mult'] = bs.u(8);
+    h['cb_offset'] = bs.u(9);
+  }
+  if (h['num_cr_points']) {
+    h['cr_mult'] = bs.u(8);
+    h['cr_luma_mult'] = bs.u(8);
+    h['cr_offset'] = bs.u(9);
+  }
+  h['overlap_flag'] = bs.u(1);
+  h['clip_to_restricted_range'] = bs.u(1);
 };
 
 function bitstream_parser_h264() {
@@ -1163,13 +2364,18 @@ bitstream_parser_h265.prototype.parse = function(buffer, addr) {
               21].indexOf(h['nal_unit_type']) >= 0) {
     this.slice_segment_header(bs, h);
     h['@keyframe'] = [19, 20].indexOf(h['nal_unit_type']) >= 0 ? 1 : 0;
-    if (h['@keyframe'])
+    if (h['@keyframe']) {
       h['@type'] = 'IDR';
-    else
+    } else {
       h['@type'] = ['B', 'P', 'I'][h['slice_type']];
+    }
     h['@extra'] = this.nal_unit_type[h['nal_unit_type']];
-    if (h['first_slice_segment_in_pic_flag'])
+    h['@extra'] += ' ' + (h['@keyframe'] ? 0 : h['slice_pic_order_cnt_lsb']);
+    h['@poc'] = h['@keyframe'] ? 0 : h['slice_pic_order_cnt_lsb'];
+
+    if (h['first_slice_segment_in_pic_flag']) {
       h['@frame_num'] = this.frame_num++;
+    }
   }
 
   h['@addr'] = addr;
@@ -2608,242 +3814,4 @@ bitstream_parser_h265.prototype.slice_segment_header = function(bs, sh) {
 bitstream_parser_h265.prototype.parse_sei = function(bs) {
   var seis = {};
   return seis;
-};
-
-function file_parser_rtp() {
-  file_parser_base.call(this);
-  this.rtpdump_signature = null;
-  this.rtpdump_rd_hdr = null;
-  this.rtpdump_rd_packet = null;
-  this.known_pt = {
-    98: {
-      'parser': new file_parser_rtp_h264(),
-      'last_seq_num': null,
-    },
-  };
-  this.num_needed_bytes = 1;
-}
-
-file_parser_rtp.prototype = new file_parser_base();
-file_parser_rtp.prototype.parse = function(buffer) {
-  if (buffer == null) {
-    return;
-  }
-
-  var pos = 0;
-  while (pos < buffer.length) {
-    var num_read_bytes = Math.min(this.num_needed_bytes, buffer.length - pos);
-    for (var i = 0; i < num_read_bytes; ++i) {
-      this.buffer[this.recv++] = buffer[pos++];
-    }
-
-    this.num_needed_bytes -= num_read_bytes;
-    if (this.num_needed_bytes) {
-      continue;
-    }
-
-    if (this.rtpdump_signature == null) {
-      if (String.fromCharCode(this.buffer[this.recv - 1]) != '\n') {
-        this.num_needed_bytes = 1;
-        continue;
-      } else {
-        this.rtpdump_signature = bytes2str(this.buffer.slice(0, -1));
-        this.num_needed_bytes = 16;
-      }
-    } else {
-      var bs = new bitstream(this.buffer.slice(0, this.recv));
-      if (this.rtpdump_rd_hdr == null) {
-        this.rtpdump_rd_hdr = this.parse_rd_hrd(bs);
-        this.num_needed_bytes = 8;
-      } else if (this.rtpdump_rd_packet == null) {
-        this.rtpdump_rd_packet = this.parse_rd_packet(bs);
-        this.num_needed_bytes = this.rtpdump_rd_packet['length'] - 8;
-      } else {
-        var rtp_header = this.parse_rtp_packet(bs);
-        rtp_header['@addr'] = this.addr;
-
-        var rtp_header_length = bs.bitpos() >> 3;
-        var num_show_bytes =
-            Math.min(16, (this.buffer.length - rtp_header_length) >> 2);
-        if (num_show_bytes > 0) {
-          var str = '';
-          for (var i = 0; i < num_show_bytes; ++i) {
-            str += int2str(this.buffer[rtp_header_length + i], 16, 8, '', 0);
-          }
-          rtp_header['payload_data'] = str;
-        }
-
-        if (rtp_header['payload_type'] in this.known_pt) {
-          var pt = this.known_pt[rtp_header['payload_type']];
-          if (pt.last_seq_num != null) {
-            var expected_seq_num = (pt.last_seq_num + 1) % 0xffff;
-            if (rtp_header['seq_num'] != expected_seq_num) {
-              var h = {};
-              h['@error'] = 'Gap in seq_num ' + pt.last_seq_num + '...' +
-                  rtp_header['seq_num'];
-              store_header(h);
-            }
-          }
-
-          pt.last_seq_num = rtp_header['seq_num'];
-        }
-
-        store_header(rtp_header);
-
-        if (rtp_header['payload_type'] in this.known_pt) {
-          pt.parser.parse(
-              this.buffer.slice(bs.bitpos() >> 3, this.recv),
-              this.addr + rtp_header_length, this.store);
-        }
-
-        this.rtpdump_rd_packet = null;
-        this.num_needed_bytes = 8;
-      }
-    }
-
-    this.addr += this.recv;
-    this.recv = 0;
-  }
-};
-
-file_parser_rtp.prototype.parse_rd_hrd = function(bs) {
-  var h = {};
-  h['start_sec'] = bs.u(32);
-  h['start_usec'] = bs.u(32);
-  h['source'] = bs.u(32);
-  h['port'] = bs.u(16);
-  bs.u(16);  // padding
-  h['@type'] = 'RD_hdr';
-  h['@length'] = 16;
-  return h;
-};
-
-file_parser_rtp.prototype.parse_rd_packet = function(bs) {
-  var h = {};
-  h['length'] = bs.u(16);
-  h['plen'] = bs.u(16);
-  h['offset'] = bs.u(32);
-  h['@type'] = 'RD_packet';
-  h['@length'] = 8;
-  return h;
-};
-
-file_parser_rtp.prototype.parse_rtp_packet = function(bs) {
-  var h = {};
-  h['version'] = bs.u(2);
-  h['padding'] = bs.u(1);
-  h['extension'] = bs.u(1);
-  h['csrc_count'] = bs.u(4);
-  h['marker'] = bs.u(1);
-  h['payload_type'] = bs.u(7);
-  h['seq_num'] = bs.u(16);
-  h['timestamp'] = bs.u(32);
-  h['ssrc'] = bs.u(32);
-  bs.u(h['csrc_count'] * 32);
-
-  if (h['extension']) {
-    h['ext_type'] = '0x' + int2str(bs.u(16), 16, 4, '0');
-    h['ext_len'] = bs.u(16);
-    bs.u(h['ext_len'] * 32);
-  }
-
-  h['@type'] = 'RTP';
-  h['@length'] = bs.length;
-  h['@extra'] = int2str(h['payload_type'], 10, 3, ' ', 0) + ' ' +
-      int2str(h['seq_num'], 10, 5, ' ');
-  return h;
-};
-
-function file_parser_rtp_h264() {
-  this.annexb_parser = new file_parser_annexb('H264');
-  this.num_needed_bytes = 1;
-}
-
-file_parser_rtp_h264.prototype.parse = function(buffer, addr) {
-  if (buffer == null) {
-    this.annexb_parser.parse(null, addr);
-    this.num_needed_bytes = 1;
-  } else {
-    var nal_unit_type = buffer[0] & 0x1f;
-    if (nal_unit_type == 24) {
-      // STAP-A
-      var pos = 1;
-      while (pos + 3 < buffer.length) {
-        var nal_unit_size = (buffer[pos++] << 8) | buffer[pos++];
-        this.annexb_parser.parse(new Uint8Array([0, 0, 1]));
-        this.annexb_parser.parse(
-            buffer.slice(pos, pos + nal_unit_size), addr + pos);
-        this.annexb_parser.parse(null);
-        pos += nal_unit_size;
-      }
-    } else if (nal_unit_type == 28) {
-      // FU-A
-      var fu_header = buffer[1];
-      var start_bit = fu_header & 0x80;
-      var end_bit = fu_header & 0x40;
-
-      if (start_bit) {
-        var nalu_header = (buffer[0] & 0xe0) | (buffer[1] & 0x1f);
-        this.annexb_parser.parse(new Uint8Array([0, 0, 1, nalu_header]), addr);
-      }
-      this.annexb_parser.parse(buffer.slice(2));
-      if (end_bit) {
-        this.annexb_parser.parse(null);
-      }
-    } else {
-      this.annexb_parser.parse(new Uint8Array([0, 0, 1]));
-      this.annexb_parser.parse(buffer, addr);
-      this.annexb_parser.parse(null);
-    }
-  }
-};
-
-file_parser_rtp.prototype.parse_vp8_payload_descriptor = function(bs) {
-  var h = {};
-  h['X'] = bs.u(1);
-  h['R'] = bs.u(1);
-  h['N'] = bs.u(1);
-  h['S'] = bs.u(1);
-  h['PartID'] = bs.u(4);
-
-  if (h['X']) {
-    h['I'] = bs.u(1);
-    h['L'] = bs.u(1);
-    h['T'] = bs.u(1);
-    h['K'] = bs.u(1);
-    h['RSV'] = bs.u(4);
-
-    if (h['I']) h['PictureID'] = bs.u(8);
-    if (h['L']) h['TL0PICIDX'] = bs.u(8);
-
-    if (h['T'] || h['K']) {
-      var TID = bs.u(2);
-      var Y = bs.u(1);
-      var KEYIDX = bs.u(5);
-      if (h['T']) {
-        h['TID'] = TID;
-        h['Y'] = Y;
-      }
-      if ('K') h['KEYIDX'] = KEYIDX;
-    }
-  }
-
-  h['@type'] = 'VP8 PD';
-  h['@length'] = bs.length;
-  h['@extra'] = h['S'];
-  return h;
-};
-
-file_parser_rtp.prototype.parse_generic_payload_descriptor = function(bs) {
-  var h = {};
-  bs.u(5);
-  h['ext'] = bs.u(1);
-  h['key'] = bs.u(1);
-  h['first'] = bs.u(1);
-  if (h['ext']) h['pid'] = bs.u(16);
-  h['@type'] = 'Generic PD';
-  h['@length'] = bs.length;
-  h['@extra'] = 'key ' + h['key'];
-  if (h['ext']) h['@extra'] += ' pid' + h['pid'];
-  return h;
 };
