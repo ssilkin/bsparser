@@ -497,7 +497,7 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
       int2str(h['#FrameHeight'], 10, 4, ' ', 1) + ' QP ' +
       int2str(h['base_q_idx'], 10, 3, ' ', 0);
   h['@extra'] += ' upd ' +
-      ('refresh_frame_flags' in h ? h['refresh_frame_flags'] : '11111111');
+      ('refresh_frame_flags' in h ? int2str(h['refresh_frame_flags'], 2, 8, '0', 0) : '11111111');
   if ('ref_frame_idx[0]' in h) {
     var ref_mask = (1 << h['ref_frame_idx[0]']) | (1 << h['ref_frame_idx[1]']) |
         (1 << h['ref_frame_idx[2]']);
@@ -617,16 +617,19 @@ bitstream_parser_av1.prototype.parse = function(buffer, addr) {
 
     h['@addr'] = addr + (obu_header_bitpos >> 3);
     h['@type'] = this.obu_types[h['obu_type']];
-    h['@length'] = (bs.bitpos() - obu_header_bitpos) >> 3;
-    store_header(h);
 
     if ('obu_size' in h) {
       var payload_bits = bs.bitpos() - payload_bitpos;
       var trailing_bits = h['obu_size'] * 8 - payload_bits;
       if (trailing_bits > 0) bs.u(trailing_bits);
+      h['@length'] = h['obu_size'] + ((payload_bitpos - obu_header_bitpos) >> 3);
     } else {
-      break;
+      h['@length'] = buffer.length;
     }
+
+    store_header(h);
+    if (!('obu_size' in h))
+      break;
   }
 };
 
