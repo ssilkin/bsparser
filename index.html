@@ -129,8 +129,8 @@ $('#files').change(function(e) {
 });
 
 $(document).scroll(function() {
-  if (document.body.scrollHeight ===
-      document.body.scrollTop + window.innerHeight) {
+  if (document.body.scrollHeight * 0.95 <
+    document.body.scrollTop + window.innerHeight) {
     if (g_ctx.file_pos < g_ctx.file_length) {
       g_ctx.max_num_headers += 100;
       parse();
