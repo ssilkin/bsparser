@@ -1825,7 +1825,7 @@ bitstream_parser_h264.prototype.profile = function(sps) {
     86: 'Scalable High'
   };
 
-  profile = sps['profile_idc'] in profile_idc ?
+  var profile = sps['profile_idc'] in profile_idc ?
       profile_idc[sps['profile_idc']] :
       'Unknown';
   if (sps['profile_idc'] == 66) {
