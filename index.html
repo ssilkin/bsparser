@@ -22,6 +22,7 @@ pre {
 <script src='./parser.js'></script>
 <script>
 var g_ctx = {
+  'fmt' : null,
   'parser' : null,
   'file' : null,
   'file_length' : 0,
@@ -48,9 +49,11 @@ function add(h) {
       + padstr('Frame',   5, ' ', false)
       + padstr('Offset', 10, ' ', false)
       + padstr('Length', 10, ' ', false)
-      + padstr('Type',   25, ' ', false)
-      + padstr('Info',    6, ' ', false)
-      + '</span><br>';
+      + padstr('Type',   25, ' ', false);
+    if (g_ctx.fmt == 'ivf') {
+      e += padstr('Timestamp', 10, ' ', false);
+    }
+    e += '</span><br>';
     $('#content').append(e);
   }
 
@@ -60,6 +63,10 @@ function add(h) {
       + padstr(tostr(h['@addr'], 16, 8, '0'), 10, ' ', false)
       + tostr(h['@length'], 10, 10, ' ')
       + padstr(h['@type'], 25, ' ', false);
+    if (g_ctx.fmt == 'ivf') {
+      str += ('@ts' in h)?
+          tostr(h['@ts'], 10, 10, ' ') : padstr(' ', 10, ' ', false);
+    }
     if ('@extra' in h) {
       str += '  ' + h['@extra'];
     }
@@ -109,8 +116,8 @@ function open(file) {
   fr.onloadend = (function(file) {
     return function(evt) {
       if (evt.target.readyState == FileReader.DONE) {
-        var fmt = file.name.toLowerCase().split('.').pop();
-        g_ctx.parser = create_parser(fmt);
+        g_ctx.fmt = file.name.toLowerCase().split('.').pop();
+        g_ctx.parser = create_parser(g_ctx.fmt);
         if (g_ctx.parser == null)
           return;
 

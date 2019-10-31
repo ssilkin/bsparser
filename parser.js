@@ -185,6 +185,7 @@ function file_parser_base() {
   this.buffer = new Uint8Array(1024 * 1024);
   this.recv = 0;
   this.addr = 0;
+  this.ts = null;
   this.next_header_idx = 0;
 
   this.next = function() {
@@ -252,8 +253,16 @@ file_parser_ivf.prototype.parse = function(buffer) {
     } else if (this.frame_size == null) {
       this.frame_size = this.num_needed_bytes = (this.buffer[3] << 24) |
           (this.buffer[2] << 16) | (this.buffer[1] << 8) | this.buffer[0];
+      this.ts = 0;
+      for (var i = 0; i < 8; ++i) {
+        this.ts += this.buffer[4 + i] << (i * 8);
+      }
     } else if (this.parser != null) {
-      this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
+      var h = this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
+      if (h != null) {
+        h['@ts'] = this.ts;
+        store_header(h);
+      }
       this.num_needed_bytes = 12;
       this.frame_size = null;
     }
@@ -328,7 +337,8 @@ file_parser_annexb.prototype.parse = function(buffer, addr) {
         this.buffer[this.recv++] = byte;
         if (this.code == 1) {
           this.recv -= 3;
-          this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
+          var h = his.parser.parse(this.buffer.slice(0, this.recv), this.addr);
+          store_header(h);
           this.addr += this.recv + cnt3;
           this.recv = 0;
           cnt3 = 0;
@@ -360,7 +370,7 @@ bitstream_parser_vp8.prototype.parse = function(buffer, addr) {
   h['@length'] = buffer.length;
   h['@keyframe'] = 1 - h['frame_type'];
   h['@frame_num'] = this.frame_num++;
-  store_header(h);
+  return h;
 };
 
 function bitstream_parser_vp9() {
@@ -504,7 +514,7 @@ bitstream_parser_vp9.prototype.parse = function(buffer, addr) {
     h['@extra'] += ' ref ' + int2str(ref_mask, 2, 8, '0', 0);
   }
   h['@frame_num'] = this.frame_num++;
-  store_header(h);
+  return h;
 };
 
 bitstream_parser_vp9.prototype.color_config = function(h, bs) {
@@ -631,6 +641,7 @@ bitstream_parser_av1.prototype.parse = function(buffer, addr) {
     if (!('obu_size' in h))
       break;
   }
+  return null;
 };
 
 bitstream_parser_av1.prototype.find_ref = function(idx) {
@@ -1797,7 +1808,7 @@ bitstream_parser_h264.prototype.parse = function(buffer, addr) {
   h['@addr'] = addr;
   h['@length'] = buffer.length;
   h['@data'] = buffer;
-  store_header(h);
+  return h;
 };
 
 bitstream_parser_h264.prototype.find_nalu = function(type, key, value) {
@@ -2384,7 +2395,7 @@ bitstream_parser_h265.prototype.parse = function(buffer, addr) {
   h['@addr'] = addr;
   if (!('@type' in h)) h['@type'] = this.nal_unit_type[h['nal_unit_type']];
   h['@length'] = buffer.length;
-  store_header(h);
+  return h;
 };
 
 bitstream_parser_h265.prototype.find_nalu = function(type, key, value) {
