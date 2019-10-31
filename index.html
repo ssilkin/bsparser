@@ -51,7 +51,7 @@ function add(h) {
       + padstr('Length', 10, ' ', false)
       + padstr('Type',   25, ' ', false);
     if (g_ctx.fmt == 'ivf') {
-      e += padstr('Timestamp', 10, ' ', false);
+      e += padstr('Timestamp', 12, ' ', false);
     }
     e += '</span><br>';
     $('#content').append(e);
@@ -65,7 +65,7 @@ function add(h) {
       + padstr(h['@type'], 25, ' ', false);
     if (g_ctx.fmt == 'ivf') {
       str += ('@ts' in h)?
-          tostr(h['@ts'], 10, 10, ' ') : padstr(' ', 10, ' ', false);
+          tostr(h['@ts'], 10, 12, ' ') : padstr(' ', 12, ' ', false);
     }
     if ('@extra' in h) {
       str += '  ' + h['@extra'];
