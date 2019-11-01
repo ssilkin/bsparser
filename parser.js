@@ -337,7 +337,7 @@ file_parser_annexb.prototype.parse = function(buffer, addr) {
         this.buffer[this.recv++] = byte;
         if (this.code == 1) {
           this.recv -= 3;
-          var h = his.parser.parse(this.buffer.slice(0, this.recv), this.addr);
+          var h = this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
           store_header(h);
           this.addr += this.recv + cnt3;
           this.recv = 0;
