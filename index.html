@@ -1,184 +1,186 @@
 <html>
+
 <head>
   <title>bsparser</title>
 </head>
 <style type='text/css'>
-* {
-  font-family:monospace;
-}
+  * {
+    font-family: monospace;
+  }
 
-pre {
+  pre {
     margin: 0 0;
-}
-
+  }
 </style>
+
 <body>
-<div style='height: 0px;width: 0px; overflow:hidden;'>
-  <input type='file' id='files'>
-</div>
-<div id='menu'></div>
-<pre id='content'></pre>
-<script src='https://ajax.googleapis.com/ajax/libs/jquery/3.1.0/jquery.min.js'></script>
-<script src='./parser.js'></script>
-<script>
-var g_ctx = {
-  'fmt' : null,
-  'parser' : null,
-  'file' : null,
-  'file_length' : 0,
-  'file_pos' : 0,
-  'max_num_headers' : 100,
-  'num_headers' : 0,
-};
+  <div style='height: 0px;width: 0px; overflow:hidden;'>
+    <input type='file' id='files'>
+  </div>
+  <div id='menu'></div>
+  <pre id='content'></pre>
+  <script src='https://ajax.googleapis.com/ajax/libs/jquery/3.1.0/jquery.min.js'></script>
+  <script src='./parser.js'></script>
+  <script>
+    var g_ctx = {
+      'fmt': null,
+      'parser': null,
+      'file': null,
+      'file_length': 0,
+      'file_pos': 0,
+      'max_num_headers': 100,
+      'num_headers': 0,
+    };
 
-function padstr(x, length, padding, after) {
-  if (x.length > length)
-    return x.slice(0, length);
-  var pad = Array(length - x.length + 1).join(padding);
-  return after? x + pad : pad + x;
-}
-
-function tostr(x, base, length, padding) {
-  var str = x.toString(base);
-  return padstr(str, length, padding, false);
-}
-
-function add(h) {
-  if (!($('#content').is(':parent'))) {
-    var e = '<span>'
-      + padstr('Frame',   5, ' ', false)
-      + padstr('Offset', 10, ' ', false)
-      + padstr('Length', 10, ' ', false)
-      + padstr('Type',   25, ' ', false);
-    if (g_ctx.fmt == 'ivf') {
-      e += padstr('Timestamp', 12, ' ', false);
-    }
-    e += '</span><br>';
-    $('#content').append(e);
-  }
-
-  var str;
-  if ('@type' in h) {
-    str = ('@frame_num' in h? tostr(h['@frame_num'], 10, 5, ' ') : '     ')
-      + padstr(tostr(h['@addr'], 16, 8, '0'), 10, ' ', false)
-      + tostr(h['@length'], 10, 10, ' ')
-      + padstr(h['@type'], 25, ' ', false);
-    if (g_ctx.fmt == 'ivf') {
-      str += ('@ts' in h)?
-          tostr(h['@ts'], 10, 12, ' ') : padstr(' ', 12, ' ', false);
-    }
-    if ('@extra' in h) {
-      str += '  ' + h['@extra'];
-    }
-  } else if ('@error' in h) {
-    str = h['@error'];
-  } else {
-    alert('Unknown format of header.');
-    return;
-  }
-
-  var $elem = $('<span>', {id: 'h' + h['@id'], text: str});
-  if ((h['@keyframe'] || 0) || (h['@type'] || 0) == 'I') {
-    $elem.attr('style', 'color:red');
-  } else if ('@error' in h) {
-    $elem.attr('style', 'background-color:red');
-  }
-  $('#content').append($elem);
-  $('#content').append('<br>');
-
-  ++g_ctx.num_headers;
-}
-
-function parse() {
-  while (g_ctx.file_pos < g_ctx.file_length) {
-    var buffer = new Uint8Array(g_ctx.file_data.slice(g_ctx.file_pos,
-      g_ctx.file_pos + Math.min(1024, g_ctx.file_length - g_ctx.file_pos)));
-    g_ctx.file_pos += buffer.length;
-    g_ctx.parser.parse(buffer);
-
-    if (g_ctx.file_pos >= g_ctx.file_length) {
-      g_ctx.parser.parse(null);
+    function padstr(x, length, padding, after) {
+      if (x.length > length)
+        return x.slice(0, length);
+      var pad = Array(length - x.length + 1).join(padding);
+      return after ? x + pad : pad + x;
     }
 
-    while(1) {
-      var h = g_ctx.parser.next();
-      if (h==null) break;
-      add(h);
+    function tostr(x, base, length, padding) {
+      var str = x.toString(base);
+      return padstr(str, length, padding, false);
     }
 
-    if (g_ctx.num_headers >= g_ctx.max_num_headers)
-      break;
-  }
-}
+    function add(h) {
+      if (!($('#content').is(':parent'))) {
+        var e = '<span>'
+          + padstr('Frame', 5, ' ', false)
+          + padstr('Offset', 10, ' ', false)
+          + padstr('Length', 10, ' ', false)
+          + padstr('Type', 25, ' ', false);
+        if (g_ctx.fmt == 'ivf') {
+          e += padstr('Timestamp', 12, ' ', false);
+        }
+        e += '</span><br>';
+        $('#content').append(e);
+      }
 
-function open(file) {
-  var fr = new FileReader();
-  fr.onloadend = (function(file) {
-    return function(evt) {
-      if (evt.target.readyState == FileReader.DONE) {
-        g_ctx.fmt = file.name.toLowerCase().split('.').pop();
-        g_ctx.parser = create_parser(g_ctx.fmt);
-        if (g_ctx.parser == null)
-          return;
+      var str;
+      if ('@type' in h) {
+        str = ('@frame_num' in h ? tostr(h['@frame_num'], 10, 5, ' ') : '     ')
+          + padstr(tostr(h['@addr'], 16, 8, '0'), 10, ' ', false)
+          + tostr(h['@length'], 10, 10, ' ')
+          + padstr(h['@type'], 25, ' ', false);
+        if (g_ctx.fmt == 'ivf') {
+          str += ('@ts' in h) ?
+            tostr(h['@ts'], 10, 12, ' ') : padstr(' ', 12, ' ', false);
+        }
+        if ('@extra' in h) {
+          str += '  ' + h['@extra'];
+        }
+      } else if ('@error' in h) {
+        str = h['@error'];
+      } else {
+        alert('Unknown format of header.');
+        return;
+      }
 
-        g_ctx.file_data = evt.target.result;
-        g_ctx.file_length = evt.target.result.byteLength;
-        parse();
+      var $elem = $('<span>', { id: 'h' + h['@id'], text: str });
+      if ((h['@keyframe'] || 0) || (h['@type'] || 0) == 'I') {
+        $elem.attr('style', 'color:red');
+      } else if ('@error' in h) {
+        $elem.attr('style', 'background-color:red');
+      }
+      $('#content').append($elem);
+      $('#content').append('<br>');
+
+      ++g_ctx.num_headers;
+    }
+
+    function parse() {
+      while (g_ctx.file_pos < g_ctx.file_length) {
+        var buffer = new Uint8Array(g_ctx.file_data.slice(g_ctx.file_pos,
+          g_ctx.file_pos + Math.min(1024, g_ctx.file_length - g_ctx.file_pos)));
+        g_ctx.file_pos += buffer.length;
+        g_ctx.parser.parse(buffer);
+
+        if (g_ctx.file_pos >= g_ctx.file_length) {
+          g_ctx.parser.parse(null);
+        }
+
+        while (1) {
+          var h = g_ctx.parser.next();
+          if (h == null) break;
+          add(h);
+        }
+
+        if (g_ctx.num_headers >= g_ctx.max_num_headers)
+          break;
       }
     }
-  })(file);
-  fr.readAsArrayBuffer(file);
-}
 
-$('#files').change(function(e) {
-  $('#open').remove();
-  open(e.target.files[0]);
-});
+    function open(file) {
+      var fr = new FileReader();
+      fr.onloadend = (function (file) {
+        return function (evt) {
+          if (evt.target.readyState == FileReader.DONE) {
+            g_ctx.fmt = file.name.toLowerCase().split('.').pop();
+            g_ctx.parser = create_parser(g_ctx.fmt);
+            if (g_ctx.parser == null)
+              return;
 
-$(document).scroll(function() {
-  if (document.body.scrollHeight * 0.95 <
-    document.body.scrollTop + window.innerHeight) {
-    if (g_ctx.file_pos < g_ctx.file_length) {
-      g_ctx.max_num_headers += 100;
-      parse();
-    }
-  }
-});
-
-$(document).ready(function() {
-  var $open = $('<button>', {text: 'Open'});
-  $open.click(function() {
-    $('#files').trigger('click');
-  });
-  $('#menu').append($open);
-
-  $('#content').click(function(evt) {
-    var id = evt.target.id;
-    if (id) {
-      if (id.substring(0, 1) == 'h') {
-        var next = $(evt.target).next('span');
-        if (next.length && next[0].id && next[0].id.substring(0, 1) == 'c') {
-          // Hide content on second click.
-          $(next[0]).remove();
-        } else {
-          id = parseInt(id.substring(1, id.length));
-          var h = g_ctx.parser.get(id);
-          var elem = '<span id=\'c' + id + '\' style=\'color:gray\'>';
-          for (var k in h) {
-            var startswith = k.substring(0, 1);
-            if (startswith != '@' && startswith != '#') {
-              console.log(k, h[k]);
-              elem += '<br><span> ' + padstr(k, 50, ' ', 1)
-                + h[k] + '</span>';
-            }
+            g_ctx.file_data = evt.target.result;
+            g_ctx.file_length = evt.target.result.byteLength;
+            parse();
           }
-          elem += '</span>';
-          $(event.target).after(elem);
+        }
+      })(file);
+      fr.readAsArrayBuffer(file);
+    }
+
+    $('#files').change(function (e) {
+      $('#open').remove();
+      open(e.target.files[0]);
+    });
+
+    $(document).scroll(function () {
+      if (document.body.scrollHeight * 0.95 <
+        document.body.scrollTop + window.innerHeight) {
+        if (g_ctx.file_pos < g_ctx.file_length) {
+          g_ctx.max_num_headers += 100;
+          parse();
         }
       }
-    }
-  });
-});
-</script>
+    });
+
+    $(document).ready(function () {
+      var $open = $('<button>', { text: 'Open' });
+      $open.click(function () {
+        $('#files').trigger('click');
+      });
+      $('#menu').append($open);
+
+      $('#content').click(function (evt) {
+        var id = evt.target.id;
+        if (id) {
+          if (id.substring(0, 1) == 'h') {
+            var next = $(evt.target).next('span');
+            if (next.length && next[0].id && next[0].id.substring(0, 1) == 'c') {
+              // Hide content on second click.
+              $(next[0]).remove();
+            } else {
+              id = parseInt(id.substring(1, id.length));
+              var h = g_ctx.parser.get(id);
+              var elem = '<span id=\'c' + id + '\' style=\'color:gray\'>';
+              for (var k in h) {
+                var startswith = k.substring(0, 1);
+                if (startswith != '@' && startswith != '#') {
+                  console.log(k, h[k]);
+                  elem += '<br><span> ' + padstr(k, 50, ' ', 1)
+                    + h[k] + '</span>';
+                }
+              }
+              elem += '</span>';
+              $(event.target).after(elem);
+            }
+          }
+        }
+      });
+    });
+  </script>
 </body>
+
 </html>

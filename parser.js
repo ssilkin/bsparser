@@ -258,11 +258,7 @@ file_parser_ivf.prototype.parse = function (buffer) {
         this.ts += this.buffer[4 + i] << (i * 8);
       }
     } else if (this.parser != null) {
-      var h = this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
-      if (h != null) {
-        h['@ts'] = this.ts;
-        store_header(h);
-      }
+      this.parser.parse(this.buffer.slice(0, this.recv), this.addr, this.ts, /*is_complete_nalu=*/true);
       this.num_needed_bytes = 12;
       this.frame_size = null;
     }
@@ -302,49 +298,52 @@ function file_parser_annexb(fourcc) {
 }
 
 file_parser_annexb.prototype = new file_parser_base();
-file_parser_annexb.prototype.parse = function (buffer, addr) {
-  if (buffer == null) {
-    if (!this.first && this.recv > 0) {
-      this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
-      this.code = 0xffffffff;
-      this.first = true;
-      this.recv = 0;
-    }
-  } else {
-    var pos = 0;
-    if (this.first) {
-      while (pos < buffer.length) {
-        var byte = buffer[pos++];
-        this.addr++;
-        this.code = ((this.code << 8) | byte) & 0x00ffffff;
-        if (this.code == 1) {
-          this.first = false;
-          break;
-        }
-      }
-    }
-
+file_parser_annexb.prototype.parse = function (buffer, addr = undefined, ts = undefined, is_complete_nalu = false) {
+  if (buffer != null) {
     var cnt3 = 0;
+    var pos = 0;
     while (pos < buffer.length) {
-      if (this.code == 1 && addr !== undefined) {
-        this.addr = addr + pos;
-      }
       var byte = buffer[pos++];
-      this.code = ((this.code << 8) | byte) & 0x00ffffff;
-      if (this.code == 3) {
+      this.code = (this.code << 8) | byte;
+      if ((this.code & 0x00ffffff) == 3) {
         cnt3++;
-      } else {
-        this.buffer[this.recv++] = byte;
-        if (this.code == 1) {
-          this.recv -= 3;
-          var h = this.parser.parse(this.buffer.slice(0, this.recv), this.addr);
-          store_header(h);
-          this.addr += this.recv + cnt3;
-          this.recv = 0;
-          cnt3 = 0;
+        continue;
+      }
+
+      if (this.recv == 0) {
+        if ((this.code & 0xffffff00) != 0x0100) {
+          this.addr++;
+          continue; // Skip until first NALU.
+        }
+        if (addr != undefined) {
+          this.addr = addr + pos - 1;
         }
       }
+
+      if ((this.code & 0x00ffffff) != 0x01) {
+        this.buffer[this.recv++] = byte;
+      } else {
+        var nalu_length = this.recv - 2;
+        var h = this.parser.parse(this.buffer.slice(0, nalu_length));
+        h['@addr'] = this.addr;
+        h['@ts'] = ts;
+        h['@length'] = nalu_length;
+        store_header(h);
+        this.addr += this.recv + cnt3 + 1; // Include 0x1 byte.
+        this.recv = 0;
+        cnt3 = 0;
+      }
     }
+  }
+
+  if ((buffer == null || is_complete_nalu) && this.recv > 0) {
+    var h = this.parser.parse(this.buffer.slice(0, this.recv));
+    h['@addr'] = this.addr;
+    h['@ts'] = ts;
+    h['@length'] = this.recv;
+    store_header(h);
+    this.addr += this.recv + cnt3;
+    this.recv = 0;
   }
 };
 
@@ -352,7 +351,7 @@ function bitstream_parser_vp8() {
   this.frame_num = 0;
 };
 
-bitstream_parser_vp8.prototype.parse = function (buffer, addr) {
+bitstream_parser_vp8.prototype.parse = function (buffer, addr, ts) {
   var bs = new bitstream(buffer);
   var h = {};
   var byte = bs.u(8);
@@ -366,18 +365,19 @@ bitstream_parser_vp8.prototype.parse = function (buffer, addr) {
     h['height'] = (bs.u(8) | (bs.u(8) << 8)) & 0x3fff;
   }
   h['@addr'] = addr;
+  h['@ts'] = ts;
   h['@type'] = h['frame_type'] == 0 ? 'I' : 'P';
   h['@length'] = buffer.length;
   h['@keyframe'] = 1 - h['frame_type'];
   h['@frame_num'] = this.frame_num++;
-  return h;
+  store_header(h);
 };
 
 function bitstream_parser_vp9() {
   this.frame_num = 0;
 }
 
-bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
+bitstream_parser_vp9.prototype.parse = function (buffer, addr, ts) {
   var bs = new bitstream(buffer);
   var h = {};
   var ref_idx = 0;
@@ -500,6 +500,7 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
   h['header_size_in_bytes'] = bs.u(16);
 
   h['@addr'] = addr;
+  h['@ts'] = ts;
   h['@type'] = h['frame_type'] == 0 ? 'I' : 'P';
   h['@length'] = buffer.length;
   h['@keyframe'] = 1 - h['frame_type'];
@@ -514,7 +515,7 @@ bitstream_parser_vp9.prototype.parse = function (buffer, addr) {
     h['@extra'] += ' ref ' + int2str(ref_mask, 2, 8, '0', 0);
   }
   h['@frame_num'] = this.frame_num++;
-  return h;
+  store_header(h);
 };
 
 bitstream_parser_vp9.prototype.color_config = function (h, bs) {
@@ -606,7 +607,7 @@ function bitstream_parser_av1() {
   this.frame_num = 0;
   this.seq_header = null;
 };
-bitstream_parser_av1.prototype.parse = function (buffer, addr) {
+bitstream_parser_av1.prototype.parse = function (buffer, addr, ts) {
   var bs = new bitstream(buffer);
   while (bs.bitsleft() >> 3) {
     var obu_header_bitpos = bs.bitpos();
@@ -629,6 +630,7 @@ bitstream_parser_av1.prototype.parse = function (buffer, addr) {
 
     h['@addr'] = addr + (obu_header_bitpos >> 3);
     h['@type'] = this.obu_types[h['obu_type']];
+    h['@ts'] = ts;
 
     if ('obu_size' in h) {
       var payload_bits = bs.bitpos() - payload_bitpos;
@@ -643,7 +645,6 @@ bitstream_parser_av1.prototype.parse = function (buffer, addr) {
     if (!('obu_size' in h))
       break;
   }
-  return null;
 };
 
 bitstream_parser_av1.prototype.find_ref = function (idx) {
@@ -1769,7 +1770,7 @@ function bitstream_parser_h264() {
   this.frame_num = 0;
 }
 
-bitstream_parser_h264.prototype.parse = function (buffer, addr) {
+bitstream_parser_h264.prototype.parse = function (buffer) {
   var bs = new bitstream(buffer);
   var h = this.parse_nalu(bs);
   if (h['nal_unit_type'] == 6) {
@@ -1801,10 +1802,6 @@ bitstream_parser_h264.prototype.parse = function (buffer, addr) {
   if (!('@type' in h)) {
     h['@type'] = this.nal_unit_type[h['nal_unit_type']];
   }
-
-  h['@addr'] = addr;
-  h['@length'] = buffer.length;
-  h['@data'] = buffer;
   return h;
 };
 
@@ -2357,7 +2354,7 @@ function bitstream_parser_h265() {
   this.frame_num = 0;
 }
 
-bitstream_parser_h265.prototype.parse = function (buffer, addr) {
+bitstream_parser_h265.prototype.parse = function (buffer) {
   var bs = new bitstream(buffer);
   var h = this.parse_nalu(bs);
 
@@ -2389,9 +2386,10 @@ bitstream_parser_h265.prototype.parse = function (buffer, addr) {
     }
   }
 
-  h['@addr'] = addr;
-  if (!('@type' in h)) h['@type'] = this.nal_unit_type[h['nal_unit_type']];
-  h['@length'] = buffer.length;
+  if (!('@type' in h)) {
+    h['@type'] = this.nal_unit_type[h['nal_unit_type']];
+  }
+
   return h;
 };
 
